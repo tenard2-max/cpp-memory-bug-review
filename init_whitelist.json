@@ -1,0 +1,13 @@
+{
+  "init_functions": [
+    "memset",
+    "ZeroMemory",
+    "SecureZeroMemory",
+    "calloc"
+  ],
+  "entry_functions": [
+    "Init",
+    "OnInitDialog",
+    "ResetData"
+  ]
+}

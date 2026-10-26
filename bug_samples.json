@@ -1,0 +1,75 @@
+[
+  {
+    "id": 1,
+    "category": "포인터 sizeof 오용",
+    "keywords": [
+      "memset",
+      "sizeof",
+      "pPacket"
+    ],
+    "bad_code": "void ClearPacket(TRAN_PACKET* pPacket) {\n    memset(pPacket, 0x00, sizeof(pPacket));\n    SendPacket(pPacket);\n}",
+    "good_code": "memset(pPacket, 0x00, sizeof(TRAN_PACKET));\nSendPacket(pPacket);",
+    "explanation": "sizeof(pPacket)은 포인터 크기라 32비트에서 4바이트만 지운다. 56바이트 구조체의 나머지와 패딩은 쓰레기 값이다. sizeof(TRAN_PACKET) 또는 sizeof(*pPacket)을 써야 한다.",
+    "is_false_positive": false
+  },
+  {
+    "id": 2,
+    "category": "구조체 부분 미초기화",
+    "keywords": [
+      "SendPacket",
+      "packet",
+      "memset"
+    ],
+    "bad_code": "void MakePacket() {\n    TRAN_PACKET packet;\n    packet.nType = 1;\n    SendPacket(&packet);\n}",
+    "good_code": "TRAN_PACKET packet;\nmemset(&packet, 0, sizeof(packet));\npacket.nType = 1;\nSendPacket(&packet);",
+    "explanation": "일부 멤버만 넣으면 나머지 멤버와 패딩에 쓰레기 값이 남는다. 보내기 전에 = {0,} 또는 memset(&packet, 0, sizeof(packet))으로 구조체 전체를 먼저 지워야 한다.",
+    "is_false_positive": false
+  },
+  {
+    "id": 3,
+    "category": "조기 리턴 시 미해제",
+    "keywords": [
+      "malloc",
+      "new",
+      "return"
+    ],
+    "bad_code": "BOOL LoadAccount(int err) {\n    char* buffer = (char*)malloc(128);\n    if (buffer == NULL) {\n        return FALSE;\n    }\n    if (err) {\n        return FALSE;\n    }\n    free(buffer);\n    return TRUE;\n}",
+    "good_code": "if (err) {\n    free(buffer);\n    return FALSE;\n}\nfree(buffer);\nreturn TRUE;",
+    "explanation": "할당에 성공한 뒤 if (err) return으로 빠지면 free 또는 delete가 실행되지 않는다. NULL이라 할당이 실패해서 바로 return하는 경우는 누수가 아니다.",
+    "is_false_positive": false
+  },
+  {
+    "id": 4,
+    "category": "strncpy 널 누락",
+    "keywords": [
+      "strncpy"
+    ],
+    "bad_code": "void CopyCard(const char* src) {\n    char dest[16];\n    strncpy(dest, src, sizeof(dest));\n    UseCard(dest);\n}",
+    "good_code": "strncpy(dest, src, sizeof(dest));\ndest[sizeof(dest) - 1] = '\\0';\nUseCard(dest);",
+    "explanation": "strncpy는 길이가 꽉 차면 널 문자를 넣지 않는다. 마지막 바이트에 dest[sizeof(dest)-1] = '\\0'을 넣어야 버퍼 너머를 읽지 않는다.",
+    "is_false_positive": false
+  },
+  {
+    "id": 5,
+    "category": "스택 버퍼 오버플로우",
+    "keywords": [
+      "sprintf",
+      "logBuffer"
+    ],
+    "bad_code": "void WriteLog() {\n    char logBuffer[16];\n    sprintf(logBuffer, \"Packet Processed: %s\", \"dfjsdlfklfdkl\");\n}",
+    "good_code": "char logBuffer[64];\nsnprintf(logBuffer, sizeof(logBuffer), \"Packet Processed: %s\", \"dfjsdlfklfdkl\");",
+    "explanation": "char logBuffer[16]은 16바이트다. \"Packet Processed: \"와 \"dfjsdlfklfdkl\"과 널만 합쳐도 32바이트라 스택을 침범한다. 배열을 키우거나 snprintf로 길이를 제한해야 한다.",
+    "is_false_positive": false
+  },
+  {
+    "id": 6,
+    "category": "초기화 없이 버퍼 사용",
+    "keywords": [
+      "scrat"
+    ],
+    "bad_code": "scrat(logBuffer, abc);",
+    "good_code": "sprintf(logBuffer, \"addd\");\nmemset(abc, 0x00, sizeof(abc));\nsprintf(abc,\"3333\");\nscrcat(logBuffer, abc);",
+    "explanation": "scrat 에 사용된 변수는 초기화(memset) 가 필수 이고,",
+    "is_false_positive": false
+  }
+]

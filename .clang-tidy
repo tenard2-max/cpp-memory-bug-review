@@ -1,0 +1,10 @@
+---
+# LLVM 23 은 기본 검사가 꺼져 있고, 설치된 확장은 --checks 를 넘기지 않습니다.
+# 이 파일이 없으면 헤더 경로가 맞아도 "no checks enabled" 로 끝납니다.
+Checks: >
+  clang-diagnostic-*,
+  clang-analyzer-*,
+  bugprone-*,
+  -clang-analyzer-osx.*,
+  -clang-analyzer-optin.osx.*
+HeaderFilterRegex: '.*'

@@ -1,0 +1,28 @@
+﻿파일명,줄 번호,함수명,버그 종류,확신도,현재 코드,수정 제안,근거
+bug.cpp,14,ProcessAtmTransaction,누수,High,"11: // [시연용 괴물/의심 함수] 계좌 거래 처리 함수
+12: int ProcessAtmTransaction(const char* rawPacket) {
+13:     // 1. 메모리 할당 (하지만 해제하지 않음 -> 메모리 누수 유발)
+14:     ATM_TRANSACTION* trans = (ATM_TRANSACTION*)malloc(sizeof(ATM_TRANSACTION));
+15:     
+16:     memset(trans, 0, sizeof(trans));
+17:     // 2. 미초기화 버그: memset이나 초기화 없이 구조체 멤버 바로 사용 ",free(trans);,가로 총 주다 세요
+bug.cpp,17,ProcessAtmTransaction,미초기화 읽기,High,"14:     ATM_TRANSACTION* trans = (ATM_TRANSACTION*)malloc(sizeof(ATM_TRANSACTION));
+15:     
+16:     memset(trans, 0, sizeof(trans));
+17:     // 2. 미초기화 버그: memset이나 초기화 없이 구조체 멤버 바로 사용 
+18:     // (trans->balance는 쓰레기값이 들어가 있어 치명적 오류 발생 가능)
+19:     if (rawPacket != NULL) {
+20:         trans->transCode = 1001;",trans->balance = 0;,trans->balance 초기화 누락
+bug.cpp,26,ProcessAtmTransaction,버퍼 넘침,High,"23: 
+24:     // 3. 버퍼 오버플로우 취약점 (sprintf 고위험 함수 사용)
+25:     char logBuffer[16];
+26:     sprintf(logBuffer, ""Packet Processed: %s"", ""dfjsdlfklfdkl""""); // rawPacket이 길면 오버플로우 발생
+27: 
+28:     if (trans->balance > 50000.0) {
+29:         printf(""VIP Transaction Detected\n"");","snprintf(logBuffer, sizeof(logBuffer), ""Packet Processed: %s"", ""dfjsdlfklfdkl"");",sprintf 고위험 함수 사용
+bug.cpp,32,ProcessAtmTransaction,누수,High,"29:         printf(""VIP Transaction Detected\n"");
+30:     }
+31: 
+32:     // [버그 포인트] free(trans)가 빠져 있어 메모리 누수(Memory Leak) 발생!
+33:     return 0;
+34: }",free(trans);,free(trans)가 빠져 있어 메모리 누수 발생

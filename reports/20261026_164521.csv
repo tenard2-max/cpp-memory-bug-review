@@ -1,0 +1,24 @@
+﻿파일명,줄 번호,함수명,버그 종류,확신도,현재 코드,수정 제안,근거
+bug.cpp,7,ProcessAtmTransaction,포인터 sizeof 오용,High,"4:     // 1. 메모리 할당 (하지만 해제하지 않음 -> 메모리 누수 유발)
+5:     ATM_TRANSACTION* trans = (ATM_TRANSACTION*)malloc(sizeof(ATM_TRANSACTION));
+6:     
+7:     memset(trans, 0, sizeof(trans));
+8:     // 2. 미초기화 버그: memset이나 초기화 없이 구조체 멤버 바로 사용 
+9:     // (trans->balance는 쓰레기값이 들어가 있어 치명적 오류 발생 가능)
+10:     if (rawPacket != NULL) {","memset(trans, 0, sizeof(ATM_TRANSACTION));",포인터 크기만 지우는 memset 호출
+bug.cpp,12,ProcessAtmTransaction,미초기화 읽기,High,"9:     // (trans->balance는 쓰레기값이 들어가 있어 치명적 오류 발생 가능)
+10:     if (rawPacket != NULL) {
+11:         trans->transCode = 1001;
+12:         // trans->balance 초기화 누락!
+13:     }
+14: 
+15: ","// trans->balance 초기화 누락!
+trans->balance = 0.0;",미초기화 버그: memset이나 초기화 없이 구조체 멤버 바로 사용
+bug.cpp,18,ProcessAtmTransaction,버퍼 넘침,High,"15: 
+16:     // 3. 버퍼 오버플로우 취약점 (sprintf 고위험 함수 사용)
+17:     char logBuffer[16];
+18:     sprintf(logBuffer, ""Packet Processed: %s"", ""dfjsdlfklfdkl""); // rawPacket이 길면 오버플로우 발생
+19: 
+20:     scrat(logBuffer, abc);
+21:     if (trans->balance > 50000.0) {","char logBuffer[64];
+snprintf(logBuffer, sizeof(logBuffer), ""Packet Processed: %s"", ""dfjsdlfklfdkl"");",char[16] 스택 배열에 널 포함 최소 32바이트를 써 스택을 침범

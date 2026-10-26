@@ -1,0 +1,5 @@
+# 레거시 헤더 루트. 프로그램은 이 목록만 인덱싱한다.
+header_roots:
+  - d:\work\src
+include_inline_bodies: false
+context_token_budget: 3048

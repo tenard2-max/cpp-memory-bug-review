@@ -1,0 +1,10 @@
+{
+    "clangTidy.executable": "C:/Program Files/LLVM/bin/clang-tidy.exe",
+    "clangTidy.systemIncludePath": [
+        "C:/Program Files (x86)/Microsoft Visual Studio 9.0/VC/atlmfc/include",
+        "C:/Program Files (x86)/Microsoft Visual Studio 9.0/VC/include"
+    ],
+    "clangTidy.extraCompilerArgs": [
+        "-std=c++03"
+    ]
+}
