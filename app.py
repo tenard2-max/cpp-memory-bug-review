@@ -274,6 +274,61 @@ div[data-testid="stAppViewContainer"] > .main > div.block-container {
     color: #b7c4d1;
     margin-bottom: 0.08rem;
 }
+.st-key-guide_canvas .cmd-metric-emphasis,
+.st-key-guide_canvas .cmd-metric-shared {
+    margin: 0.45rem 0 0.5rem 0;
+    padding: 0.42rem 0.5rem 0.4rem 0.5rem;
+}
+.st-key-guide_canvas .cmd-metric-emphasis {
+    background: #3a3224;
+    border: 1px solid #e0872f;
+    box-shadow: inset 0 0 0 1px rgba(224, 135, 47, 0.18);
+}
+.st-key-guide_canvas .cmd-metric-shared {
+    background: #243038;
+    border: 1px solid #7ec8e3;
+    box-shadow: inset 0 0 0 1px rgba(126, 200, 227, 0.18);
+}
+.st-key-guide_canvas .cmd-metric-emphasis .cmd-metric-row,
+.st-key-guide_canvas .cmd-metric-shared .cmd-metric-row {
+    margin-bottom: 0.18rem;
+    letter-spacing: 0.02em;
+}
+.st-key-guide_canvas .cmd-metric-emphasis .cmd-metric-row {
+    color: #fff3e0;
+}
+.st-key-guide_canvas .cmd-metric-shared .cmd-metric-row {
+    color: #e8f7fc;
+}
+.st-key-guide_canvas .cmd-metric-emphasis .cmd-metric-label {
+    color: #ffd089 !important;
+    font-weight: 700;
+    font-size: 0.8rem;
+}
+.st-key-guide_canvas .cmd-metric-shared .cmd-metric-label {
+    color: #9ad7ef !important;
+    font-weight: 700;
+    font-size: 0.8rem;
+}
+.st-key-guide_canvas .cmd-metric-emphasis .cmd-metric-value,
+.st-key-guide_canvas .cmd-metric-shared .cmd-metric-value {
+    color: #ffffff !important;
+    font-weight: 700;
+    font-size: 0.8rem;
+}
+.st-key-guide_canvas .cmd-metric-emphasis .cmd-track,
+.st-key-guide_canvas .cmd-metric-shared .cmd-track {
+    height: 9px;
+    margin-top: 0.12rem;
+}
+.st-key-guide_canvas .cmd-metric-emphasis .cmd-track {
+    background: #241c12;
+    border: 1px solid #c07828;
+}
+.st-key-guide_canvas .cmd-metric-shared .cmd-track {
+    background: #152028;
+    border: 1px solid #5aa7c2;
+}
 .st-key-guide_canvas .cmd-track {
     height: 7px;
     background: #2a3038;
@@ -401,6 +456,16 @@ with st.container(key="app_header", border=False):
                 st.session_state.screen = name
                 st.rerun()
         if st.button("옵션", key="nav-option", type="secondary", use_container_width=True):
+            # 다이얼로그 위젯은 별도 키를 쓰고, 열 때 현재 저장값을 복사한다.
+            st.session_state["dlg_vram"] = st.session_state.get("vram", "8")
+            st.session_state["dlg_ram"] = st.session_state.get("ram", "16")
+            st.session_state["dlg_shared_memory"] = bool(st.session_state.get("shared_memory"))
+            st.session_state["dlg_model_name"] = st.session_state.get("model_name", DEFAULT_MODEL)
+            st.session_state["dlg_cross_enabled"] = bool(st.session_state.get("cross_enabled"))
+            st.session_state["dlg_deepseek_model"] = st.session_state.get("deepseek_model", DEFAULT_MODEL)
+            st.session_state["dlg_llama_model"] = st.session_state.get("llama_model", DEFAULT_MODEL)
+            st.session_state["dlg_num_predict"] = st.session_state.get("num_predict", 1024)
+            st.session_state["dlg_cpp_standard"] = st.session_state.get("cpp_standard", "c++03")
             st.session_state["_open_options"] = True
             st.rerun()
 screen = st.session_state.screen
@@ -409,6 +474,8 @@ if "vram" not in st.session_state:
     st.session_state.vram = "8"
 if "ram" not in st.session_state:
     st.session_state.ram = "16"
+if "shared_memory" not in st.session_state:
+    st.session_state.shared_memory = False
 if not str(st.session_state.get("ollama_url") or "").strip():
     st.session_state.ollama_url = DEFAULT_OLLAMA_URL
 if "model_name" not in st.session_state:
@@ -463,8 +530,33 @@ def _select_model(label: str, key: str, help_text: str, installed: list[str]) ->
     current = str(st.session_state.get(key) or DEFAULT_MODEL)
     choices = _model_choices(current, installed)
     if current not in choices:
+        # 위젯 생성 전에만 기본값을 보정한다.
         st.session_state[key] = choices[0]
+        current = choices[0]
     st.selectbox(label, choices, key=key, help=help_text)
+
+
+def _commit_options_from_dialog() -> None:
+    """옵션 다이얼로그 임시 키를 앱 저장값으로 옮긴다."""
+    st.session_state.vram = str(st.session_state.get("dlg_vram") or st.session_state.get("vram") or "8")
+    st.session_state.ram = str(st.session_state.get("dlg_ram") or st.session_state.get("ram") or "16")
+    st.session_state.shared_memory = bool(st.session_state.get("dlg_shared_memory"))
+    st.session_state.model_name = str(
+        st.session_state.get("dlg_model_name") or st.session_state.get("model_name") or DEFAULT_MODEL
+    )
+    st.session_state.cross_enabled = bool(st.session_state.get("dlg_cross_enabled"))
+    st.session_state.deepseek_model = str(
+        st.session_state.get("dlg_deepseek_model") or st.session_state.get("deepseek_model") or DEFAULT_MODEL
+    )
+    st.session_state.llama_model = str(
+        st.session_state.get("dlg_llama_model") or st.session_state.get("llama_model") or DEFAULT_MODEL
+    )
+    st.session_state.num_predict = int(
+        st.session_state.get("dlg_num_predict") or st.session_state.get("num_predict") or 1024
+    )
+    st.session_state.cpp_standard = str(
+        st.session_state.get("dlg_cpp_standard") or st.session_state.get("cpp_standard") or "c++03"
+    )
 
 
 @st.dialog("검토 결과")
@@ -495,49 +587,68 @@ def review_done_dialog() -> None:
 @st.dialog("옵션")
 def options_dialog() -> None:
     """하드웨어, 분석 모델, 토큰, cppcheck 표준을 한곳에서 관리한다."""
+    # 위젯 생성 전에 다이얼로그 키 기본값을 보장한다.
+    st.session_state.setdefault("dlg_vram", st.session_state.get("vram", "8"))
+    st.session_state.setdefault("dlg_ram", st.session_state.get("ram", "16"))
+    st.session_state.setdefault("dlg_shared_memory", bool(st.session_state.get("shared_memory")))
+    st.session_state.setdefault("dlg_model_name", st.session_state.get("model_name", DEFAULT_MODEL))
+    st.session_state.setdefault("dlg_cross_enabled", bool(st.session_state.get("cross_enabled")))
+    st.session_state.setdefault("dlg_deepseek_model", st.session_state.get("deepseek_model", DEFAULT_MODEL))
+    st.session_state.setdefault("dlg_llama_model", st.session_state.get("llama_model", DEFAULT_MODEL))
+    st.session_state.setdefault("dlg_num_predict", st.session_state.get("num_predict", 1024))
+    st.session_state.setdefault("dlg_cpp_standard", st.session_state.get("cpp_standard", "c++03"))
+
     installed = installed_models(st.session_state.ollama_url)
     st.markdown("**하드웨어**")
-    vram = st.radio(
+    # 다이얼로그 전용 키(dlg_*)만 위젯에 연결한다. 닫을 때 앱 저장키로 커밋한다.
+    st.radio(
         "그래픽 메모리",
         list(VRAM_LABELS),
         format_func=lambda key: VRAM_LABELS[key],
-        index=list(VRAM_LABELS).index(st.session_state.vram),
+        key="dlg_vram",
     )
-    ram = st.radio(
+    st.radio(
         "메인 메모리",
         list(RAM_LABELS),
         format_func=lambda key: RAM_LABELS[key],
-        index=list(RAM_LABELS).index(st.session_state.ram),
+        key="dlg_ram",
     )
-    chosen = hardware_profile(vram, ram)
+    st.checkbox(
+        "공유 메모리 사용",
+        key="dlg_shared_memory",
+        help="켜면 안내 패널의 VRAM 아래에 시스템 공유 메모리 사용량을 표시합니다. "
+        "내장 그래픽처럼 VRAM과 메인 메모리를 같이 쓰는 PC에 맞습니다.",
+    )
+    chosen = hardware_profile(st.session_state.dlg_vram, st.session_state.dlg_ram)
     st.write(f"권장 {chosen['model']} · 컨텍스트 {chosen['num_ctx']}")
     st.caption(chosen["note"])
     if installed and chosen["model"] not in installed:
         st.warning(f"{chosen['model']} 이 이 PC에 없습니다. 적용한 뒤 검토 화면에서 받아야 검토가 시작됩니다.")
     if st.button("하드웨어 권장 적용", type="secondary"):
-        st.session_state.vram = vram
-        st.session_state.ram = ram
+        _commit_options_from_dialog()
         st.session_state["_pending_model"] = chosen["model"]
         st.rerun()
 
     st.markdown("**모델·호출**")
-    _select_model("분석 모델", "model_name", "메모리·초기화 1차 분석. 기본은 qwen2.5-coder:7b", installed)
-    st.checkbox("교차 검증", key="cross_enabled", help="켜져 있을 때만 두 번째 모델을 호출합니다. 기본은 끔입니다.")
-    _select_model("교차 검증 모델", "deepseek_model", "교차 검증을 켰을 때 쓰는 모델. 기본은 qwen2.5-coder:7b", installed)
-    _select_model("문장 정리 모델", "llama_model", "발견 항목의 한국어 해설만 다듬습니다. 기본은 qwen2.5-coder:7b", installed)
+    _select_model("분석 모델", "dlg_model_name", "메모리·초기화 1차 분석. 기본은 qwen2.5-coder:7b", installed)
+    st.checkbox("교차 검증", key="dlg_cross_enabled", help="켜져 있을 때만 두 번째 모델을 호출합니다. 기본은 끔입니다.")
+    _select_model("교차 검증 모델", "dlg_deepseek_model", "교차 검증을 켰을 때 쓰는 모델. 기본은 qwen2.5-coder:7b", installed)
+    _select_model("문장 정리 모델", "dlg_llama_model", "발견 항목의 한국어 해설만 다듬습니다. 기본은 qwen2.5-coder:7b", installed)
     st.selectbox(
         "토큰 상한",
         PREDICT_CHOICES,
-        key="num_predict",
+        key="dlg_num_predict",
         help="모델이 한 번 호출에서 생성하는 최대 토큰입니다. 기본은 1024입니다.",
     )
     st.selectbox(
         "cppcheck 언어 표준",
         ["c++03", "c++17"],
-        key="cpp_standard",
+        key="dlg_cpp_standard",
         help="VS 2008 소스는 c++03이 맞습니다.",
     )
+    st.caption("닫기를 누르면 선택 내용이 저장됩니다.")
     if st.button("닫기", type="primary"):
+        _commit_options_from_dialog()
         st.session_state["_open_options"] = False
         st.rerun()
 
@@ -779,6 +890,7 @@ def show_guide_command_panel() -> None:
         mem_history=st.session_state.guide_mem_hist,
         cpu_history=st.session_state.guide_cpu_hist,
         host=host,
+        shared_memory=bool(st.session_state.get("shared_memory")),
     )
     st.markdown(markup, unsafe_allow_html=True)
 

@@ -2,39 +2,14 @@
 
 from __future__ import annotations
 
-import csv
 import html
-import shutil
-import subprocess
-import time
 from dataclasses import dataclass
-from io import StringIO
-from pathlib import Path
 from typing import Sequence
 
 import psutil
 
 from cpu_meter import sample_cpu
-
-_NVIDIA_CANDIDATES = (
-    r"C:\Windows\System32\nvidia-smi.exe",
-    r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe",
-)
-
-
-@dataclass
-class GpuSnapshot:
-    index: int
-    name: str
-    temperature_c: float | None = None
-    memory_used_mb: float | None = None
-    memory_total_mb: float | None = None
-    fan_rpm: float | None = None
-    utilization_pct: float | None = None
-
-
-_WMI_GPU_CACHE: list[GpuSnapshot] | None = None
-_WMI_GPU_CACHE_AT = 0.0
+from gpu_meter import GpuSnapshot, sample_gpus
 
 
 @dataclass
@@ -48,123 +23,11 @@ class HostSnapshot:
     warnings: list[str]
 
 
-def _parse_num(raw: str) -> float | None:
-    text = (raw or "").strip()
-    if not text or text.upper() in {"N/A", "[N/A]", "NA"}:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
-def _nvidia_exe() -> str:
-    found = shutil.which("nvidia-smi")
-    if found:
-        return found
-    for candidate in _NVIDIA_CANDIDATES:
-        if Path(candidate).is_file():
-            return candidate
-    return ""
-
-
-def _nvidia_gpus() -> list[GpuSnapshot]:
-    exe = _nvidia_exe()
-    if not exe:
-        return []
-    try:
-        completed = subprocess.run(
-            [
-                exe,
-                "--query-gpu=index,name,temperature.gpu,memory.used,memory.total,fan.speed,utilization.gpu",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=2,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return []
-    if completed.returncode != 0:
-        return []
-    gpus: list[GpuSnapshot] = []
-    for line in completed.stdout.splitlines():
-        parts = [part.strip() for part in line.split(",")]
-        if len(parts) < 7:
-            continue
-        index = int(_parse_num(parts[0]) or len(gpus))
-        gpus.append(
-            GpuSnapshot(
-                index=index,
-                name=parts[1] or f"GPU_{index}",
-                temperature_c=_parse_num(parts[2]),
-                memory_used_mb=_parse_num(parts[3]),
-                memory_total_mb=_parse_num(parts[4]),
-                fan_rpm=_parse_num(parts[5]),
-                utilization_pct=_parse_num(parts[6]),
-            )
-        )
-    return gpus
-
-
-def _wmi_gpus() -> list[GpuSnapshot]:
-    global _WMI_GPU_CACHE, _WMI_GPU_CACHE_AT
-    now = time.monotonic()
-    if _WMI_GPU_CACHE is not None and now - _WMI_GPU_CACHE_AT < 30:
-        return list(_WMI_GPU_CACHE)
-    try:
-        completed = subprocess.run(
-            [
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                "Get-CimInstance Win32_VideoController | "
-                "Select-Object Name, AdapterRAM | ConvertTo-Csv -NoTypeInformation",
-            ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=3,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return list(_WMI_GPU_CACHE or [])
-    if completed.returncode != 0:
-        return list(_WMI_GPU_CACHE or [])
-    lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
-    if len(lines) < 2:
-        return list(_WMI_GPU_CACHE or [])
-    gpus: list[GpuSnapshot] = []
-    for line in lines[1:]:
-        parts = next(csv.reader(StringIO(line)), None)
-        if not parts:
-            continue
-        name = (parts[0] or "").strip()
-        if not name:
-            continue
-        lower = name.lower()
-        if "microsoft" in lower and "basic" in lower:
-            continue
-        total_mb = None
-        if len(parts) > 1:
-            raw_ram = _parse_num(parts[1])
-            if raw_ram and raw_ram > 0:
-                total_mb = raw_ram / (1024 * 1024)
-        gpus.append(GpuSnapshot(index=len(gpus), name=name, memory_total_mb=total_mb))
-    _WMI_GPU_CACHE = gpus
-    _WMI_GPU_CACHE_AT = now
-    return list(gpus)
-
-
 def sample_host(extra_warnings: Sequence[str] | None = None) -> HostSnapshot:
     """CPU·RAM·GPU 상태를 한 번에 읽는다."""
     system_cpu, ollama_cpu = sample_cpu()
     memory = psutil.virtual_memory()
-    gpus = _nvidia_gpus() or _wmi_gpus()
+    gpus = sample_gpus()
     warnings = list(extra_warnings or [])
     if not gpus:
         warnings.append("GPU_ENUM: 표시할 그래픽 장치를 찾지 못했습니다.")
@@ -181,12 +44,26 @@ def sample_host(extra_warnings: Sequence[str] | None = None) -> HostSnapshot:
     )
 
 
-def _bar(label: str, value_text: str, ratio: float | None, color: str) -> str:
+def _bar(
+    label: str,
+    value_text: str,
+    ratio: float | None,
+    color: str,
+    *,
+    emphasize: bool = False,
+    shared: bool = False,
+) -> str:
     width = 0 if ratio is None else max(0, min(100, ratio * 100))
+    if shared:
+        css_class = "cmd-metric cmd-metric-shared"
+    elif emphasize:
+        css_class = "cmd-metric cmd-metric-emphasis"
+    else:
+        css_class = "cmd-metric"
     return (
-        f'<div class="cmd-metric">'
-        f'<div class="cmd-metric-row"><span>{html.escape(label)}</span>'
-        f"<span>{html.escape(value_text)}</span></div>"
+        f'<div class="{css_class}">'
+        f'<div class="cmd-metric-row"><span class="cmd-metric-label">{html.escape(label)}</span>'
+        f'<span class="cmd-metric-value">{html.escape(value_text)}</span></div>'
         f'<div class="cmd-track"><div class="cmd-fill" style="width:{width:.1f}%;background:{color};"></div></div>'
         f"</div>"
     )
@@ -222,6 +99,63 @@ def _device_card(title: str, body_html: str) -> str:
     )
 
 
+def _shared_memory_bar(gpu: GpuSnapshot | None, host: HostSnapshot) -> str:
+    """옵션에서 공유 메모리를 켰을 때 VRAM 아래에 붙는 행(GPU 공유 메모리)."""
+    if gpu and gpu.shared_used_mb is not None and gpu.shared_total_mb:
+        used_gb = gpu.shared_used_mb / 1024.0
+        total_gb = gpu.shared_total_mb / 1024.0
+        ratio = gpu.shared_used_mb / gpu.shared_total_mb if gpu.shared_total_mb else None
+        text = f"{used_gb:.1f}/{total_gb:.1f} GB ({(ratio or 0) * 100:.0f}%)"
+        return _bar("공유 메모리", text, ratio, "#7ec8e3", shared=True)
+    # GPU 공유값을 못 읽으면 시스템 RAM 대비로라도 표시
+    return _bar(
+        "공유 메모리",
+        f"{host.ram_used_mb / 1024:.1f}/{host.ram_total_mb / 1024:.1f} GB ({host.ram_percent:.0f}%) · host fallback",
+        host.ram_percent / 100.0,
+        "#7ec8e3",
+        shared=True,
+    )
+
+
+def _gpu_body(gpu: GpuSnapshot, *, vram_label: str, shared_memory: bool, host: HostSnapshot) -> str:
+    temp_ratio = None if gpu.temperature_c is None else min(gpu.temperature_c / 95.0, 1.0)
+    temp_text = "N/A" if gpu.temperature_c is None else f"{gpu.temperature_c:.0f} °C"
+
+    if gpu.memory_used_mb is not None and gpu.memory_total_mb:
+        mem_ratio = gpu.memory_used_mb / gpu.memory_total_mb
+        mem_text = f"{gpu.memory_used_mb:.0f}/{gpu.memory_total_mb:.0f} MB"
+    elif gpu.memory_used_mb is not None:
+        mem_ratio = None
+        mem_text = f"{gpu.memory_used_mb:.0f} MB used"
+    elif gpu.memory_total_mb:
+        mem_ratio = None
+        mem_text = f"total {gpu.memory_total_mb:.0f} MB"
+    else:
+        mem_ratio = None
+        mem_text = f"profile {vram_label}"
+
+    if gpu.fan_rpm is not None:
+        third_ratio = min(gpu.fan_rpm / 5000.0, 1.0)
+        third_text = f"{gpu.fan_rpm:.0f} RPM"
+        third_label = "팬"
+    elif gpu.utilization_pct is not None:
+        third_ratio = gpu.utilization_pct / 100.0
+        third_text = f"{gpu.utilization_pct:.0f}%"
+        third_label = "사용률"
+    else:
+        third_ratio = None
+        third_text = "N/A"
+        third_label = "사용률"
+
+    shared_row = _shared_memory_bar(gpu, host) if shared_memory else ""
+    return (
+        _bar("온도", temp_text, temp_ratio, "#b83b3b")
+        + _bar("VRAM / 전용", mem_text, mem_ratio, "#e0872f", emphasize=True)
+        + shared_row
+        + _bar(third_label, third_text, third_ratio, "#6f9b5a")
+    )
+
+
 def render_command_panel(
     *,
     model_name: str,
@@ -232,6 +166,7 @@ def render_command_panel(
     mem_history: Sequence[float],
     cpu_history: Sequence[float],
     host: HostSnapshot | None = None,
+    shared_memory: bool = False,
     extra_warnings: Sequence[str] | None = None,
 ) -> tuple[str, HostSnapshot]:
     """안내 칸 HTML과 방금 읽은 스냅샷을 반환한다."""
@@ -239,40 +174,19 @@ def render_command_panel(
     model = (model_name or "unknown").strip() or "unknown"
     pipeline = "LOCAL_OLLAMA_ONLINE" if online else "LOCAL_OLLAMA_OFFLINE"
     deploy = "LOCAL_ONLY · NO_UPLOAD"
+    shared_meta = "ON" if shared_memory else "OFF"
 
     gpu_cards: list[str] = []
     for gpu in host.gpus[:2]:
-        temp_ratio = None if gpu.temperature_c is None else min(gpu.temperature_c / 95.0, 1.0)
-        temp_text = "N/A" if gpu.temperature_c is None else f"{gpu.temperature_c:.0f} °C"
-        if gpu.memory_used_mb is not None and gpu.memory_total_mb:
-            mem_ratio = gpu.memory_used_mb / gpu.memory_total_mb
-            mem_text = f"{gpu.memory_used_mb:.0f}/{gpu.memory_total_mb:.0f} MB"
-        elif gpu.memory_total_mb:
-            mem_ratio = None
-            mem_text = f"reported {gpu.memory_total_mb:.0f} MB"
-        else:
-            mem_ratio = None
-            mem_text = f"profile {vram_label}"
-        if gpu.fan_rpm is not None:
-            fan_ratio = min(gpu.fan_rpm / 5000.0, 1.0)
-            fan_text = f"{gpu.fan_rpm:.0f} RPM"
-        elif gpu.utilization_pct is not None:
-            fan_ratio = gpu.utilization_pct / 100.0
-            fan_text = f"util {gpu.utilization_pct:.0f}%"
-        else:
-            fan_ratio = None
-            fan_text = "N/A"
-        body = (
-            _bar("온도", temp_text, temp_ratio, "#b83b3b")
-            + _bar("VRAM/표시", mem_text, mem_ratio, "#e0872f")
-            + _bar("팬/사용률", fan_text, fan_ratio, "#6f9b5a")
-        )
+        body = _gpu_body(gpu, vram_label=vram_label, shared_memory=shared_memory, host=host)
         gpu_cards.append(_device_card(f"GPU_{gpu.index}  {gpu.name}", body))
 
     if not gpu_cards:
+        shared_row = _shared_memory_bar(None, host) if shared_memory else ""
         body = (
             _bar("온도", "N/A", None, "#b83b3b")
-            + _bar("VRAM 프로필", vram_label, None, "#e0872f")
+            + _bar("VRAM / 전용", vram_label, None, "#e0872f", emphasize=True)
+            + shared_row
             + _bar("사용률", "N/A", None, "#6f9b5a")
         )
         gpu_cards.append(_device_card("GPU_0  (미검출)", body))
@@ -307,6 +221,12 @@ def render_command_panel(
     status_color = "#6f9b5a" if online else "#d64545"
     status_text = "STABLE" if online else "DEGRADED"
     latest_cpu = cpu_history[-1] if cpu_history else host.system_cpu
+    primary = host.gpus[0] if host.gpus else None
+    temp_note = (
+        f"{primary.temperature_c:.0f}°C"
+        if primary and primary.temperature_c is not None
+        else "temp N/A"
+    )
 
     left = "".join(gpu_cards[:2])
     mem_spark = _sparkline(mem_history or [host.ram_percent], "#7ec8e3", "rgba(126,200,227,0.22)")
@@ -320,7 +240,7 @@ def render_command_panel(
         '<div class="cmd-chart">'
         '<div class="cmd-chart-title">런타임 부하 시계열 (CPU%)</div>'
         f"{cpu_spark}"
-        f'<div class="cmd-chart-foot">{latest_cpu:.0f}% · model {html.escape(model)}</div>'
+        f'<div class="cmd-chart-foot">{latest_cpu:.0f}% · model {html.escape(model)} · GPU {temp_note}</div>'
         "</div>"
     )
 
@@ -329,7 +249,7 @@ def render_command_panel(
   <div class="cmd-head">
     <div class="cmd-title">[SYS_INIT] :: CPP_MEMORY_BUG_REVIEW</div>
     <div class="cmd-sub">TARGET: {html.escape(pipeline)}</div>
-    <div class="cmd-meta">MODEL: {html.escape(model)} &nbsp;|&nbsp; DEPLOYMENT: {html.escape(deploy)} &nbsp;|&nbsp; VRAM_PROFILE: {html.escape(vram_label)}</div>
+    <div class="cmd-meta">MODEL: {html.escape(model)} &nbsp;|&nbsp; DEPLOYMENT: {html.escape(deploy)} &nbsp;|&nbsp; VRAM_PROFILE: {html.escape(vram_label)} &nbsp;|&nbsp; SHARED_MEM: {shared_meta}</div>
   </div>
   <div class="cmd-grid">
     <div class="cmd-left">{left}</div>
