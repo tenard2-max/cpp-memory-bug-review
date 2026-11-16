@@ -12,6 +12,17 @@ SAMPLES_PATH = Path(__file__).with_name("bug_samples.json")
 MAX_INJECTED = 3
 MAX_PROMPT_LINES = 25
 MACRO_PATTERN = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b")
+_VECTOR_ENABLED = True
+
+
+def set_vector_search_enabled(enabled: bool) -> None:
+    """검토 파이프라인이 벡터 선별을 켤지 끈다."""
+    global _VECTOR_ENABLED
+    _VECTOR_ENABLED = bool(enabled)
+
+
+def vector_search_enabled() -> bool:
+    return bool(_VECTOR_ENABLED)
 
 DEFAULT_SAMPLES = [
     {
@@ -119,6 +130,14 @@ def save_samples(samples: list[dict]) -> None:
     temporary = SAMPLES_PATH.with_suffix(".json.tmp")
     temporary.write_text(payload, encoding="utf-8")
     temporary.replace(SAMPLES_PATH)
+    # 벡터 인덱스는 가능할 때만 맞춘다. 실패해도 JSON 저장은 유지한다.
+    try:
+        from vector_store import ensure_sample_index, is_available
+
+        if is_available():
+            ensure_sample_index(normalized, force=False)
+    except Exception:
+        pass
 
 
 def add_sample(fields: dict) -> tuple[dict, bool]:
@@ -197,20 +216,78 @@ def keywords_from_code(code: str, function_name: str = "") -> list[str]:
     return unique[:8] or ["정상패턴"]
 
 
-def select_samples(code: str, function_name: str = "", limit: int = MAX_INJECTED) -> list[dict]:
-    """함수 본문에 키워드가 들어 있는 샘플만 점수 순으로 최대 limit개 고른다."""
+def select_samples(
+    code: str,
+    function_name: str = "",
+    limit: int = MAX_INJECTED,
+    *,
+    use_vector: bool | None = None,
+) -> list[dict]:
+    """함수와 맞는 샘플을 고른다. 벡터 검색이 켜져 있으면 BGE-M3+Chroma를 우선하고 키워드로 보강한다."""
+    enabled = _VECTOR_ENABLED if use_vector is None else bool(use_vector)
+    samples = load_samples()
+    by_id = {item["id"]: item for item in samples}
     haystack = f"{function_name}\n{code}"
-    ranked: list[tuple[int, bool, int, dict]] = []
-    for sample in load_samples():
+    keyword_scores: dict[int, float] = {}
+    for sample in samples:
         keywords = sample["keywords"]
         if not keywords:
             continue
         hits = [keyword for keyword in keywords if _keyword_in(keyword, haystack)]
         if not hits:
             continue
-        ranked.append((len(hits), len(hits) == len(keywords), -sample["id"], sample))
-    ranked.sort(reverse=True)
-    return [item[3] for item in ranked[:limit]]
+        keyword_scores[sample["id"]] = len(hits) / max(1, len(keywords)) + (0.25 if len(hits) == len(keywords) else 0.0)
+
+    vector_scores: dict[int, float] = {}
+    if enabled:
+        try:
+            from vector_store import ensure_sample_index, is_available, query_similar_samples
+
+            if is_available():
+                ensure_sample_index(samples, force=False)
+                for row in query_similar_samples(haystack, limit=max(limit * 3, 6)):
+                    sample_id = int(row["id"])
+                    if sample_id in by_id:
+                        vector_scores[sample_id] = float(row.get("score") or 0.0)
+        except Exception:
+            vector_scores = {}
+
+    if not keyword_scores and not vector_scores:
+        return []
+
+    # 벡터 0.7 + 키워드 0.3. 키워드만 있으면 키워드 점수만 사용.
+    combined: list[tuple[float, int, dict]] = []
+    candidate_ids = set(keyword_scores) | set(vector_scores)
+    for sample_id in candidate_ids:
+        sample = by_id.get(sample_id)
+        if sample is None:
+            continue
+        vector_score = vector_scores.get(sample_id, 0.0)
+        keyword_score = keyword_scores.get(sample_id, 0.0)
+        if vector_scores and keyword_scores:
+            score = 0.7 * vector_score + 0.3 * keyword_score
+            if vector_score > 0 and keyword_score > 0:
+                reason = "hybrid"
+            elif vector_score > 0:
+                reason = "vector"
+            else:
+                reason = "keyword"
+        elif vector_scores:
+            score = vector_score
+            reason = "vector"
+        else:
+            score = keyword_score
+            reason = "keyword"
+        if score <= 0:
+            continue
+        picked = dict(sample)
+        picked["_select_score"] = round(float(score), 4)
+        picked["_select_reason"] = reason
+        picked["_vector_score"] = round(float(vector_score), 4)
+        picked["_keyword_score"] = round(float(keyword_score), 4)
+        combined.append((score, -sample_id, picked))
+    combined.sort(reverse=True)
+    return [item[2] for item in combined[:limit]]
 
 
 def format_samples(samples: list[dict]) -> str:

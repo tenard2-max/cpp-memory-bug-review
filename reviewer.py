@@ -26,20 +26,86 @@ from samples_db import format_samples, select_samples
 from whitelist import format_whitelist, load_whitelist
 
 DEFAULT_MODEL = "qwen2.5-coder:7b"
+QWEN3_MODEL = "qwen3:14b"
 DEFAULT_DEEPSEEK = "qwen2.5-coder:7b"
 DEFAULT_LLAMA = "qwen2.5-coder:7b"
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 OLLAMA_OPTIONS = {"temperature": 0.0, "num_ctx": 4096, "num_thread": 8, "num_predict": 512}
 PREDICT_CHOICES = [512, 1024, 2048, 4096, 5120, 6144, 7168, 8190]
+# FAST=/no_think 기본. AUTO는 의심 시에만 Thinking.
+THINK_MODES = ("FAST", "AUTO", "DEEP")
+DEFAULT_THINK_MODE = "FAST"
 SOURCE_EXTENSIONS = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
 BUG_TYPES = set(OUTPUT_SCHEMA["properties"]["findings"]["items"]["properties"]["bug_type"]["enum"])
 CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2}
 MAX_FILES = 30
 RULES_PATH = Path(__file__).with_name("memory_rules.txt")
+THINK_LOG_DIR = Path(__file__).with_name("logs") / "think"
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
 
 
 class ReviewError(RuntimeError):
     """검토 요청을 모델까지 보내지 못했을 때 사용한다."""
+
+
+def is_qwen3_model(model: str) -> bool:
+    """Qwen3 계열이면 Hybrid Thinking 옵션을 적용한다."""
+    name = (model or "").strip().lower()
+    return name.startswith("qwen3:") or name.startswith("qwen3-")
+
+
+def normalize_think_mode(mode: str | None) -> str:
+    text = str(mode or DEFAULT_THINK_MODE).strip().upper()
+    return text if text in THINK_MODES else DEFAULT_THINK_MODE
+
+
+def qwen3_call_preset(stage: str) -> dict:
+    """FAST=/no_think, DEEP=Thinking 프리셋. 모델명은 항상 qwen3:14b 하나다."""
+    if stage == "DEEP":
+        return {
+            "think": True,
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "num_ctx": 16384,
+            "stage": "DEEP_TRACE",
+        }
+    return {
+        "think": False,
+        "temperature": 0.1,
+        "top_p": 0.8,
+        "num_ctx": 16384,
+        "stage": "FAST_SCAN",
+    }
+
+
+def strip_think_blocks(text: str) -> tuple[str, str]:
+    """응답에서 <think> 블록을 분리한다. (본문, think 텍스트)."""
+    raw = text or ""
+    thoughts = [block.strip() for block in _THINK_BLOCK.findall(raw) if block.strip()]
+    cleaned = _THINK_BLOCK.sub("", raw).strip()
+    return cleaned, "\n\n".join(thoughts)
+
+
+def save_think_log(chunk: dict, stage: str, think_text: str) -> str:
+    """심층 추론 혼잣말을 logs/think 에 남긴다."""
+    if not think_text.strip():
+        return ""
+    THINK_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    safe_file = re.sub(r"[^\w.-]+", "_", str(chunk.get("file") or "chunk"))[:80]
+    path = THINK_LOG_DIR / f"{stamp}_{safe_file}_{chunk.get('start', 0)}_{stage}.log"
+    path.write_text(
+        (
+            f"file={chunk.get('file')}\n"
+            f"function={chunk.get('function_name')}\n"
+            f"range={chunk.get('start')}-{chunk.get('end')}\n"
+            f"stage={stage}\n\n"
+            f"{think_text.strip()}\n"
+        ),
+        encoding="utf-8",
+        errors="replace",
+    )
+    return str(path)
 
 
 def is_source(path: Path) -> bool:
@@ -60,7 +126,7 @@ def list_sources(paths: list[Path]) -> list[Path]:
 
 
 def extract_json(text: str) -> dict:
-    stripped = text.strip()
+    stripped, _think = strip_think_blocks(text.strip())
     if stripped.startswith("```"):
         lines = stripped.splitlines()[1:]
         if lines and lines[-1].strip() == "```":
@@ -187,13 +253,28 @@ def prepare_review(paths: list[Path], standard: str = "c++03", project_root: Pat
             if path.is_dir():
                 root = path
                 break
+    source_index = {"count": 0, "skipped": True}
+    if root is not None:
+        try:
+            from samples_db import vector_search_enabled
+            from vector_store import ensure_source_chunk_index, is_available
+
+            if vector_search_enabled() and is_available():
+                source_index = ensure_source_chunk_index(root)
+        except Exception as error:  # noqa: BLE001
+            source_index = {"count": 0, "error": str(error)}
     chunks, scan_stats = build_chunks(files, issues, root)
+    scan_stats = dict(scan_stats)
+    scan_stats["source_rag_chunks"] = int(source_index.get("count") or 0)
+    if source_index.get("error"):
+        scan_stats["source_rag_error"] = str(source_index["error"])
     return {
         "files": files,
         "issues": issues,
         "report": report,
         "chunks": chunks,
         "scan_stats": scan_stats,
+        "source_index": source_index,
     }
 
 
@@ -333,9 +414,11 @@ def review_paths(
     deepseek_model: str = DEFAULT_DEEPSEEK,
     llama_model: str = DEFAULT_LLAMA,
     num_predict: int = 512,
+    think_mode: str = DEFAULT_THINK_MODE,
 ) -> dict:
     """분석 모델이 창을 보고, 교차 검증이 켜진 경우에만 두 번째 모델이 다시 본다."""
-    del num_ctx
+    mode = normalize_think_mode(think_mode)
+    use_qwen3 = is_qwen3_model(model)
     prepared = prepare_review(paths, standard, project_root)
     chunks = prepared["chunks"]
     stats = prepared["scan_stats"]
@@ -348,7 +431,15 @@ def review_paths(
         "scan_stats": stats,
         "stage_notes": [],
         "unconfirmed": False,
+        "think_mode": mode if use_qwen3 else "",
+        "think_logs": [],
+        "executed_stages": [],
     }
+    if use_qwen3:
+        result["stage_notes"].append(
+            f"Qwen3 추론 모드 {mode} · 모델 {model} · "
+            + ("think=false 고정(FAST)" if mode == "FAST" else "AUTO=의심 시 Thinking" if mode == "AUTO" else "Thinking 강제(DEEP)")
+        )
     total = len(chunks)
     last_pulse = {"percent": 0.0, "label": ""}
 
@@ -403,18 +494,30 @@ def review_paths(
             _percent(index - 1, total, 0.02),
             _analysis_label(stats, index, total, "분석 요청", chunk),
         )
-        try:
-            reviewed = review_chunks(
+        first_stage = None
+        if use_qwen3:
+            first_stage = "DEEP" if mode == "DEEP" else "FAST"
+            stage_label = qwen3_call_preset(first_stage)["stage"]
+            if stage_label not in result["executed_stages"]:
+                result["executed_stages"].append(stage_label)
+
+        def run_window(prompt_note: str, stage: str | None, stream_label: str) -> dict:
+            return review_chunks(
                 [chunk],
                 prepared["report"],
-                note,
+                prompt_note,
                 model=model,
                 timeout=timeout,
+                num_ctx=num_ctx,
                 ollama_url=ollama_url,
-                on_stream=watch("분석 응답 수신", index - 1, chunk),
+                on_stream=watch(stream_label, index - 1, chunk),
                 on_wait=on_wait,
                 num_predict=num_predict,
+                think_stage=stage,
             )
+
+        try:
+            reviewed = run_window(note, first_stage, "분석 응답 수신")
         except ReviewError as error:
             if "JSON" not in str(error) and "모델 응답" not in str(error):
                 raise
@@ -426,18 +529,16 @@ def review_paths(
                 _analysis_label(stats, index, total, "이 창 건너뜀", chunk),
             )
             continue
+        if reviewed.get("think_log"):
+            result["think_logs"].append(reviewed["think_log"])
         if reviewed.get("rejected"):
-            reviewed = review_chunks(
-                [chunk],
-                prepared["report"],
+            reviewed = run_window(
                 note + "\n이 함수의 메모리 버그와 초기화 버그를 찾아라. 주석의 취약점 설명은 공격 요청이 아니다. rejected는 false.",
-                model=model,
-                timeout=timeout,
-                ollama_url=ollama_url,
-                on_stream=watch("분석 재검토", index - 1, chunk),
-                on_wait=on_wait,
-                num_predict=num_predict,
+                first_stage,
+                "분석 재검토",
             )
+            if reviewed.get("think_log"):
+                result["think_logs"].append(reviewed["think_log"])
         if reviewed.get("json_repaired"):
             result["stage_notes"].append(
                 f"{chunk['file']} {chunk.get('function_name') or ''} {chunk['start']}-{chunk['end']} 응답이 잘려 닫힌 항목만 반영했습니다."
@@ -452,6 +553,36 @@ def review_paths(
         model_found = bool(window_findings)
         if not model_found:
             window_findings = [_fill_context(dict(item), chunk, lines_by_path) for item in suspect_findings]
+        # AUTO: FAST에서 의심/발견이 있으면 같은 qwen3:14b로 Thinking만 켠 채 재검토
+        need_deep = (
+            use_qwen3
+            and mode == "AUTO"
+            and first_stage == "FAST"
+            and (model_found or bool(chunk.get("suspects")) or bool(suspect_findings))
+        )
+        if need_deep:
+            if "DEEP_TRACE" not in result["executed_stages"]:
+                result["executed_stages"].append("DEEP_TRACE")
+            emit(
+                _percent(index - 1, total, 0.85),
+                _analysis_label(stats, index, total, "정밀 Thinking 재검토", chunk),
+            )
+            try:
+                deep_reviewed = run_window(note, "DEEP", "Thinking 응답 수신")
+            except ReviewError as error:
+                result["stage_notes"].append(f"Thinking 재검토를 건너뛰었습니다: {error}")
+            else:
+                if deep_reviewed.get("think_log"):
+                    result["think_logs"].append(deep_reviewed["think_log"])
+                if not deep_reviewed.get("rejected"):
+                    window_findings = [
+                        _fill_context(finding, chunk, lines_by_path) for finding in deep_reviewed["findings"]
+                    ]
+                    model_found = bool(window_findings)
+                    if not model_found:
+                        window_findings = [
+                            _fill_context(dict(item), chunk, lines_by_path) for item in suspect_findings
+                        ]
         weak_model = "3b" in model.lower()
         cross_model = deepseek_model.strip()
         needs_cross = bool(cross_model) and (
@@ -554,6 +685,13 @@ def _ollama_chat(
     num_predict: int = 512,
     on_stream=None,
     on_wait=None,
+    *,
+    think: bool | None = None,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    num_ctx: int | None = None,
+    chunk: dict | None = None,
+    stage_name: str = "",
 ) -> dict:
     """스키마를 강제해 한 모델을 호출하고, 응답이 쌓이는 동안 글자 수를 알린다."""
     base = ollama_base(ollama_url)
@@ -561,16 +699,28 @@ def _ollama_chat(
         raise ReviewError(f"Ollama가 {base} 에서 응답하지 않습니다. Ollama를 실행하세요.")
     options = dict(OLLAMA_OPTIONS)
     options["num_predict"] = num_predict
+    if temperature is not None:
+        options["temperature"] = float(temperature)
+    if top_p is not None:
+        options["top_p"] = float(top_p)
+    if num_ctx is not None:
+        options["num_ctx"] = int(num_ctx)
+    # Qwen3 FAST는 think=false 로 혼잣말을 끄고 즉답한다. DEEP만 Thinking을 연다.
+    prompt_user = user
+    if think is False and "/no_think" not in user:
+        prompt_user = user.rstrip() + "\n\n/no_think"
     body = {
         "model": model,
         "stream": True,
         "format": OUTPUT_SCHEMA,
         "messages": [
             {"role": "system", "content": system},
-            {"role": "user", "content": user},
+            {"role": "user", "content": prompt_user},
         ],
         "options": options,
     }
+    if think is not None:
+        body["think"] = bool(think)
     request = urllib.request.Request(
         base + "/api/chat",
         data=json.dumps(body).encode("utf-8"),
@@ -645,18 +795,32 @@ def _ollama_chat(
         raise
     except Exception as error:
         raise ReviewError(f"Ollama와 통신하지 못했습니다: {error}") from error
-    content = "".join(parts) or "".join(thinking)
-    if timed_out and content.strip():
+    content = "".join(parts)
+    api_thinking = "".join(thinking)
+    if not content.strip() and api_thinking.strip():
+        content = api_thinking
+    cleaned, tagged_think = strip_think_blocks(content)
+    think_text = "\n\n".join(part for part in (api_thinking, tagged_think) if part.strip())
+    think_log = ""
+    if think_text and chunk is not None:
+        think_log = save_think_log(chunk, stage_name or "THINK", think_text)
+    parse_source = cleaned or content
+    if timed_out and parse_source.strip():
         try:
-            partial = extract_json(content)
+            partial = extract_json(parse_source)
         except ReviewError:
             partial = None
         if partial is not None:
             partial["json_repaired"] = True
+            if think_log:
+                partial["think_log"] = think_log
             return partial
     if timed_out:
         raise ReviewError("Ollama 응답 대기 시간이 초과되었습니다.")
-    return extract_json(content)
+    parsed = extract_json(parse_source)
+    if think_log:
+        parsed["think_log"] = think_log
+    return parsed
 
 
 def cross_check_chunk(
@@ -732,8 +896,8 @@ def review_chunks(
     on_stream=None,
     on_wait=None,
     num_predict: int = 512,
+    think_stage: str | None = None,
 ) -> dict:
-    del num_ctx
     rules = load_memory_rules(RULES_PATH)
     picked = _samples_for(chunks)
     if len(chunks) == 1:
@@ -742,9 +906,25 @@ def review_chunks(
                 "id": item["id"],
                 "category": item["category"],
                 "is_false_positive": item["is_false_positive"],
+                "select_reason": item.get("_select_reason") or "keyword",
+                "select_score": item.get("_select_score"),
+                "vector_score": item.get("_vector_score"),
+                "keyword_score": item.get("_keyword_score"),
             }
             for item in picked
         ]
+    call_think = None
+    call_temperature = None
+    call_top_p = None
+    call_ctx = num_ctx
+    stage_name = "STANDARD"
+    if is_qwen3_model(model) and think_stage in {"FAST", "DEEP"}:
+        preset = qwen3_call_preset(think_stage)
+        call_think = bool(preset["think"])
+        call_temperature = float(preset["temperature"])
+        call_top_p = float(preset["top_p"])
+        call_ctx = int(preset["num_ctx"])
+        stage_name = str(preset["stage"])
     return _ollama_chat(
         model,
         build_system_prompt(rules, format_samples(picked), format_whitelist(load_whitelist())),
@@ -754,4 +934,10 @@ def review_chunks(
         num_predict=num_predict,
         on_stream=on_stream,
         on_wait=on_wait,
+        think=call_think,
+        temperature=call_temperature,
+        top_p=call_top_p,
+        num_ctx=call_ctx,
+        chunk=chunks[0] if len(chunks) == 1 else None,
+        stage_name=stage_name,
     )

@@ -23,19 +23,29 @@ PROFILES = {
         "num_ctx": 4096,
         "note": "8GB 그래픽에는 더 큰 모델이 들어가지 않습니다. 메인 메모리 32GB는 여유만 늘립니다.",
     },
+    ("11", "16"): {
+        "model": "qwen3:14b",
+        "num_ctx": 16384,
+        "note": "GTX 1080 Ti 11GB에는 qwen3:14b(Q4)가 맞습니다. num_ctx=16384로 Full GPU 적재를 유지합니다.",
+    },
+    ("11", "32"): {
+        "model": "qwen3:14b",
+        "num_ctx": 16384,
+        "note": "11GB 그래픽 + 32GB 메인에서도 qwen3:14b, num_ctx=16384가 안정적입니다.",
+    },
     ("20", "16"): {
-        "model": "qwen2.5-coder:14b",
-        "num_ctx": 8192,
-        "note": "20GB 그래픽에는 14B가 들어갑니다. 32B는 그래픽 메모리가 부족합니다.",
+        "model": "qwen3:14b",
+        "num_ctx": 16384,
+        "note": "20GB 그래픽에는 qwen3:14b를 권장합니다. 컨텍스트는 16384입니다.",
     },
     ("20", "32"): {
-        "model": "qwen2.5-coder:14b",
-        "num_ctx": 8192,
-        "note": "메인 메모리가 32GB여도 20GB 그래픽에는 14B가 안정적입니다.",
+        "model": "qwen3:14b",
+        "num_ctx": 16384,
+        "note": "20GB 그래픽 + 32GB 메인에서는 qwen3:14b, num_ctx=16384가 맞습니다.",
     },
 }
 
-VRAM_LABELS = {"lt1": "1GB 미만", "8": "8GB", "20": "20GB"}
+VRAM_LABELS = {"lt1": "1GB 미만", "8": "8GB", "11": "11GB (1080 Ti)", "20": "20GB"}
 RAM_LABELS = {"16": "16GB", "32": "32GB"}
 
 
@@ -44,4 +54,6 @@ def hardware_profile(vram: str, ram: str) -> dict:
     try:
         return PROFILES[(vram, ram)]
     except KeyError as error:
-        raise ValueError("그래픽 메모리는 1GB 미만, 8GB, 20GB, 메인 메모리는 16GB, 32GB 중에서 고르세요.") from error
+        raise ValueError(
+            "그래픽 메모리는 1GB 미만, 8GB, 11GB, 20GB, 메인 메모리는 16GB, 32GB 중에서 고르세요."
+        ) from error

@@ -18,9 +18,14 @@ from report import save_reports
 from reviewer import (
     DEFAULT_MODEL,
     DEFAULT_OLLAMA_URL,
+    DEFAULT_THINK_MODE,
     PREDICT_CHOICES,
+    QWEN3_MODEL,
+    THINK_MODES,
     ReviewError,
     installed_models,
+    is_qwen3_model,
+    normalize_think_mode,
     ollama_reachable,
     review_paths,
 )
@@ -31,6 +36,7 @@ from samples_db import (
     import_samples,
     load_samples,
     register_false_positive,
+    set_vector_search_enabled,
 )
 from whitelist import add_name, load_whitelist, remove_name
 
@@ -461,11 +467,13 @@ with st.container(key="app_header", border=False):
             st.session_state["dlg_ram"] = st.session_state.get("ram", "16")
             st.session_state["dlg_shared_memory"] = bool(st.session_state.get("shared_memory"))
             st.session_state["dlg_model_name"] = st.session_state.get("model_name", DEFAULT_MODEL)
+            st.session_state["dlg_think_mode"] = normalize_think_mode(st.session_state.get("think_mode"))
             st.session_state["dlg_cross_enabled"] = bool(st.session_state.get("cross_enabled"))
             st.session_state["dlg_deepseek_model"] = st.session_state.get("deepseek_model", DEFAULT_MODEL)
             st.session_state["dlg_llama_model"] = st.session_state.get("llama_model", DEFAULT_MODEL)
             st.session_state["dlg_num_predict"] = st.session_state.get("num_predict", 1024)
             st.session_state["dlg_cpp_standard"] = st.session_state.get("cpp_standard", "c++03")
+            st.session_state["dlg_vector_search"] = bool(st.session_state.get("vector_search", True))
             st.session_state["_open_options"] = True
             st.rerun()
 screen = st.session_state.screen
@@ -480,6 +488,10 @@ if not str(st.session_state.get("ollama_url") or "").strip():
     st.session_state.ollama_url = DEFAULT_OLLAMA_URL
 if "model_name" not in st.session_state:
     st.session_state.model_name = DEFAULT_MODEL
+if "think_mode" not in st.session_state:
+    st.session_state.think_mode = DEFAULT_THINK_MODE
+if "vector_search" not in st.session_state:
+    st.session_state.vector_search = True
 if "cross_enabled" not in st.session_state:
     st.session_state.cross_enabled = False
 if "deepseek_model" not in st.session_state:
@@ -498,8 +510,13 @@ if st.session_state.get("model_defaults_version") != 4:
     st.session_state.deepseek_model = DEFAULT_MODEL
     st.session_state.llama_model = DEFAULT_MODEL
     st.session_state.model_defaults_version = 4
+if st.session_state.get("think_mode_defaults_version") != 1:
+    st.session_state.think_mode = DEFAULT_THINK_MODE
+    st.session_state.think_mode_defaults_version = 1
 if "project_root" not in st.session_state:
     st.session_state.project_root = ""
+st.session_state.think_mode = normalize_think_mode(st.session_state.get("think_mode"))
+set_vector_search_enabled(bool(st.session_state.get("vector_search", True)))
 pending_model = st.session_state.pop("_pending_model", None)
 if pending_model:
     st.session_state.model_name = pending_model
@@ -509,9 +526,10 @@ if pending_root:
 
 
 def _model_choices(current: str, installed: list[str] | None = None) -> list[str]:
-    """기본 모델, 공식 대형 코더, 이 PC에 설치된 모델을 선택 목록으로 만든다."""
+    """기본 모델, Qwen3 14B, 공식 대형 코더, 이 PC에 설치된 모델을 선택 목록으로 만든다."""
     offered = (
         DEFAULT_MODEL,
+        QWEN3_MODEL,
         "qwen2.5-coder:14b",
         "qwen2.5-coder:32b",
         current,
@@ -544,6 +562,9 @@ def _commit_options_from_dialog() -> None:
     st.session_state.model_name = str(
         st.session_state.get("dlg_model_name") or st.session_state.get("model_name") or DEFAULT_MODEL
     )
+    st.session_state.think_mode = normalize_think_mode(
+        st.session_state.get("dlg_think_mode") or st.session_state.get("think_mode")
+    )
     st.session_state.cross_enabled = bool(st.session_state.get("dlg_cross_enabled"))
     st.session_state.deepseek_model = str(
         st.session_state.get("dlg_deepseek_model") or st.session_state.get("deepseek_model") or DEFAULT_MODEL
@@ -557,6 +578,8 @@ def _commit_options_from_dialog() -> None:
     st.session_state.cpp_standard = str(
         st.session_state.get("dlg_cpp_standard") or st.session_state.get("cpp_standard") or "c++03"
     )
+    st.session_state.vector_search = bool(st.session_state.get("dlg_vector_search", True))
+    set_vector_search_enabled(st.session_state.vector_search)
 
 
 @st.dialog("검토 결과")
@@ -592,11 +615,16 @@ def options_dialog() -> None:
     st.session_state.setdefault("dlg_ram", st.session_state.get("ram", "16"))
     st.session_state.setdefault("dlg_shared_memory", bool(st.session_state.get("shared_memory")))
     st.session_state.setdefault("dlg_model_name", st.session_state.get("model_name", DEFAULT_MODEL))
+    st.session_state.setdefault(
+        "dlg_think_mode",
+        normalize_think_mode(st.session_state.get("think_mode", DEFAULT_THINK_MODE)),
+    )
     st.session_state.setdefault("dlg_cross_enabled", bool(st.session_state.get("cross_enabled")))
     st.session_state.setdefault("dlg_deepseek_model", st.session_state.get("deepseek_model", DEFAULT_MODEL))
     st.session_state.setdefault("dlg_llama_model", st.session_state.get("llama_model", DEFAULT_MODEL))
     st.session_state.setdefault("dlg_num_predict", st.session_state.get("num_predict", 1024))
     st.session_state.setdefault("dlg_cpp_standard", st.session_state.get("cpp_standard", "c++03"))
+    st.session_state.setdefault("dlg_vector_search", bool(st.session_state.get("vector_search", True)))
 
     installed = installed_models(st.session_state.ollama_url)
     st.markdown("**하드웨어**")
@@ -630,7 +658,29 @@ def options_dialog() -> None:
         st.rerun()
 
     st.markdown("**모델·호출**")
-    _select_model("분석 모델", "dlg_model_name", "메모리·초기화 1차 분석. 기본은 qwen2.5-coder:7b", installed)
+    _select_model(
+        "분석 모델",
+        "dlg_model_name",
+        f"메모리·초기화 1차 분석. Qwen3는 {QWEN3_MODEL} 하나만 쓰고 FAST에서 think를 끕니다.",
+        installed,
+    )
+    think_labels = {
+        "FAST": "FAST (/no_think, 기본·고속)",
+        "AUTO": "AUTO (FAST 후 의심 시 Thinking)",
+        "DEEP": "DEEP (Thinking 강제)",
+    }
+    st.selectbox(
+        "Qwen3 추론 모드",
+        list(THINK_MODES),
+        format_func=lambda key: think_labels.get(key, key),
+        key="dlg_think_mode",
+        help="qwen3:14b 선택 시에만 적용됩니다. 기본은 FAST로 think=false 고정입니다. "
+        "별도 fast/deep 모델명은 쓰지 않습니다.",
+    )
+    if is_qwen3_model(str(st.session_state.get("dlg_model_name") or "")):
+        st.caption("현재 분석 모델이 Qwen3입니다. FAST면 Ollama 요청에 think=false 를 넣습니다.")
+    else:
+        st.caption("Qwen3가 아니면 추론 모드는 무시되고 기존 temperature 0 호출을 씁니다.")
     st.checkbox("교차 검증", key="dlg_cross_enabled", help="켜져 있을 때만 두 번째 모델을 호출합니다. 기본은 끔입니다.")
     _select_model("교차 검증 모델", "dlg_deepseek_model", "교차 검증을 켰을 때 쓰는 모델. 기본은 qwen2.5-coder:7b", installed)
     _select_model("문장 정리 모델", "dlg_llama_model", "발견 항목의 한국어 해설만 다듬습니다. 기본은 qwen2.5-coder:7b", installed)
@@ -646,6 +696,57 @@ def options_dialog() -> None:
         key="dlg_cpp_standard",
         help="VS 2008 소스는 c++03이 맞습니다.",
     )
+    st.markdown("**벡터 검색 (ChromaDB + BGE-M3)**")
+    st.checkbox(
+        "벡터 검색 사용 (샘플·헤더·소스 RAG)",
+        key="dlg_vector_search",
+        help="켜면 BGE-M3(CPU)+Chroma로 샘플 few-shot, 헤더 심볼 보충, 프로젝트 소스 RAG를 씁니다. "
+        "꺼지면 키워드·exact·정규식만 씁니다. VRAM은 쓰지 않습니다.",
+    )
+    try:
+        from vector_store import (
+            last_error,
+            rebuild_header_symbol_index,
+            rebuild_sample_index,
+            rebuild_source_chunk_index,
+            status_all,
+        )
+
+        all_status = status_all()
+        if all_status["available"]:
+            samples = all_status["samples"]
+            headers = all_status["headers"]
+            sources = all_status["sources"]
+            st.caption(
+                f"저장: {all_status['persist_dir']} · {all_status['embed_model']}({all_status['device']}) · "
+                f"샘플 {samples.get('indexed_count', 0)} · 헤더 {headers.get('indexed_count', 0)} · "
+                f"소스 {sources.get('indexed_count', 0)}"
+            )
+            sample_col, header_col, source_col = st.columns(3)
+            if sample_col.button("샘플 재구축", type="secondary", use_container_width=True):
+                with st.spinner("샘플 벡터 인덱스 재구축 중"):
+                    rebuilt = rebuild_sample_index(load_samples())
+                st.success(f"샘플 {rebuilt['indexed_count']}건")
+            if header_col.button("헤더 재구축", type="secondary", use_container_width=True):
+                with st.spinner("헤더 심볼 벡터 인덱스 재구축 중"):
+                    rebuilt = rebuild_header_symbol_index()
+                st.success(f"헤더 {rebuilt.get('count', 0)}건")
+            if source_col.button("소스 재구축", type="secondary", use_container_width=True):
+                root_text = str(st.session_state.get("project_root") or "").strip()
+                if not root_text:
+                    st.warning("메인 화면의 프로젝트 루트를 먼저 입력하세요.")
+                else:
+                    with st.spinner("프로젝트 소스 RAG 인덱스 재구축 중"):
+                        rebuilt = rebuild_source_chunk_index(Path(root_text))
+                    st.success(f"소스 청크 {rebuilt.get('count', 0)}건 · 파일 {rebuilt.get('files', 0)}개")
+            if sources.get("root"):
+                st.caption(f"소스 인덱스 루트: {sources['root']}")
+        else:
+            st.warning("chromadb / sentence-transformers 미설치. pip install -r requirements.txt 후 재시작하세요.")
+        if last_error():
+            st.caption(f"최근 오류: {last_error()}")
+    except Exception as error:  # noqa: BLE001
+        st.caption(f"벡터 상태 확인 실패: {error}")
     st.caption("닫기를 누르면 선택 내용이 저장됩니다.")
     if st.button("닫기", type="primary"):
         _commit_options_from_dialog()
@@ -703,8 +804,15 @@ def render_header_index() -> None:
             )
             st.session_state["index_notice"] = ""
             return
+        chroma_n = result.get("chroma_headers")
+        chroma_note = f", Chroma 헤더 {chroma_n}건" if chroma_n is not None else ""
+        chroma_err = result.get("chroma_error")
         st.session_state["index_error"] = ""
-        st.session_state["index_notice"] = f"갱신 {result['updated']}개, 그대로 {result['unchanged']}개"
+        st.session_state["index_notice"] = (
+            f"갱신 {result['updated']}개, 그대로 {result['unchanged']}개{chroma_note}"
+        )
+        if chroma_err:
+            st.session_state["index_chroma_error"] = str(chroma_err)
 
     if build_column.button("전체 인덱싱", type="primary"):
         with st.spinner("헤더 심볼을 다시 만드는 중"):
@@ -718,9 +826,20 @@ def render_header_index() -> None:
     notice = st.session_state.pop("index_notice", "")
     if notice:
         st.success(notice)
+    chroma_error = st.session_state.pop("index_chroma_error", "")
+    if chroma_error:
+        st.warning(f"Chroma 헤더 동기화 실패: {chroma_error}")
     status = index_status()
+    chroma_headers = 0
+    try:
+        from vector_store import status_all
+
+        chroma_headers = int(status_all()["headers"].get("indexed_count") or 0)
+    except Exception:
+        chroma_headers = 0
     st.write(
-        f"인덱스 파일 {status['files']}개, 심볼 {status['symbols']}개. "
+        f"인덱스 파일 {status['files']}개, 심볼 {status['symbols']}개"
+        f"(Chroma {chroma_headers}건). "
         f"예산 {int(st.session_state.context_token_budget)}토큰."
     )
     if not status["roots"]:
@@ -916,9 +1035,18 @@ with status_column:
         else:
             st.error("Ollama가 실행 중이지 않습니다. START.bat으로 준비하세요.")
         show_ollama_cpu()
+        analysis_name = str(st.session_state.get("model_name") or DEFAULT_MODEL)
+        if is_qwen3_model(analysis_name):
+            mode = normalize_think_mode(st.session_state.get("think_mode"))
+            call_note = (
+                f"Qwen3 {mode} · num_ctx 16384 · "
+                + ("think=false" if mode == "FAST" else "AUTO/Thinking")
+            )
+        else:
+            call_note = "temperature 0, num_ctx 4096"
         st.info(
             f"그래픽 {VRAM_LABELS[st.session_state.vram]} · 메인 {RAM_LABELS[st.session_state.ram]} · "
-            f"권장 {profile['model']} · 호출은 temperature 0, num_ctx 4096, "
+            f"권장 {profile['model']} · 호출은 {call_note}, "
             f"num_predict {st.session_state.num_predict}, num_thread 8"
         )
         st.text_input("Ollama 주소", key="ollama_url")
@@ -927,6 +1055,8 @@ with status_column:
 analysis_model = st.session_state.model_name.strip() or DEFAULT_MODEL
 standard = str(st.session_state.get("cpp_standard") or "c++03")
 model_missing = bool(models) and analysis_model not in models
+review_num_ctx = 16384 if is_qwen3_model(analysis_model) else 4096
+review_think_mode = normalize_think_mode(st.session_state.get("think_mode"))
 
 with st.container(border=True, key="work_canvas"):
     st.markdown("##### 검토 작업")
@@ -977,12 +1107,23 @@ with st.container(border=True, key="work_canvas"):
         """저장된 검토 결과를 표, 수정 제안, 다운로드 버튼으로 보여 준다."""
         stats = result.get("scan_stats") or {}
         if stats:
+            rag_n = stats.get("source_rag_chunks")
+            rag_note = f", 소스 RAG {rag_n}청크" if rag_n is not None else ""
             st.write(
                 f"함수 {stats.get('functions', 0)}개 중 소거 {stats.get('pruned', 0)}개, "
-                f"분석 창 {stats.get('windows', len(result['chunks']))}개"
+                f"분석 창 {stats.get('windows', len(result['chunks']))}개{rag_note}"
             )
+            if stats.get("source_rag_error"):
+                st.caption(f"소스 RAG: {stats['source_rag_error']}")
         for note_text in result.get("stage_notes") or []:
             st.info(note_text)
+        if result.get("think_mode") or result.get("executed_stages"):
+            stages = ", ".join(result.get("executed_stages") or []) or "-"
+            st.caption(f"Qwen3 모드 {result.get('think_mode') or '-'} · 실행 단계 {stages}")
+        if result.get("think_logs"):
+            with st.expander(f"Thinking 로그 {len(result['think_logs'])}개"):
+                for path in result["think_logs"]:
+                    st.code(path)
         if result.get("unconfirmed") and result.get("findings"):
             st.warning("교차 검증이 끝나지 않았습니다. 아래 목록만으로 정상이라고 보지 않습니다.")
         st.write(f"모델에 넘긴 함수 조각 {len(result['chunks'])}개")
@@ -992,15 +1133,40 @@ with st.container(border=True, key="work_canvas"):
             for chunk in result["chunks"]:
                 injected = chunk.get("injected_samples") or []
                 names = ", ".join(
-                    f"{item['id']}. {item['category']}" + (" (정상)" if item["is_false_positive"] else "")
+                    (
+                        f"{item['id']}. {item['category']}"
+                        + (" (정상)" if item["is_false_positive"] else "")
+                        + (
+                            f" [{item.get('select_reason')}"
+                            + (
+                                f":{item.get('select_score')}"
+                                if item.get("select_score") is not None
+                                else ""
+                            )
+                            + "]"
+                            if item.get("select_reason")
+                            else ""
+                        )
+                    )
                     for item in injected
                 )
                 header_note = "헤더 정의 포함" if chunk.get("headers") else "헤더 정의 없음"
                 omitted = ", ".join(chunk.get("context_omitted") or [])
+                related = chunk.get("related_sources") or []
+                related_note = ", ".join(
+                    f"{item.get('file_name')}:{item.get('function_name')}"
+                    + (
+                        f"({float(item.get('score')):.2f})"
+                        if isinstance(item.get("score"), (int, float))
+                        else ""
+                    )
+                    for item in related
+                )
                 st.code(
                     f"{chunk['file']} {chunk.get('function_name', '')} {chunk['start']}-{chunk['end']} / {header_note}\n"
                     f"넣은 컨텍스트: {', '.join(chunk.get('context_included') or []) or '없음'}\n"
                     f"미포함 컨텍스트: {omitted or '없음'}\n"
+                    f"관련 소스 RAG: {related_note or '없음'}\n"
                     f"주입한 예제: {names or '없음'}\n{chunk.get('headers') or ''}\n{chunk['text']}"
                 )
         markdown_path = Path(result["markdown_path"]) if result.get("markdown_path") else None
@@ -1119,13 +1285,14 @@ with st.container(border=True, key="work_canvas"):
                     note,
                     model=st.session_state.model_name.strip() or DEFAULT_MODEL,
                     standard=standard,
-                    num_ctx=4096,
+                    num_ctx=review_num_ctx,
                     num_predict=int(st.session_state.num_predict),
                     on_progress=on_progress,
                     ollama_url=st.session_state.ollama_url,
                     project_root=project_root,
                     deepseek_model=st.session_state.deepseek_model.strip() if st.session_state.cross_enabled else "",
                     llama_model=st.session_state.llama_model.strip(),
+                    think_mode=review_think_mode,
                 )
                 markdown_path, csv_path = save_reports(result["findings"], BUG_LABELS)
                 result["markdown_path"] = str(markdown_path)

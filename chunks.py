@@ -348,6 +348,19 @@ def _append_chunk(
     local_types = _local_type_context(source_text, numbered)
     if local_types:
         headers = (local_types + "\n" + headers).strip()
+    related_sources: list[dict] = []
+    try:
+        from samples_db import vector_search_enabled
+        from vector_store import is_available, query_similar_sources
+
+        if vector_search_enabled() and is_available():
+            related_sources = query_similar_sources(
+                numbered,
+                limit=2,
+                exclude_path=str(path.resolve()),
+            )
+    except Exception:
+        related_sources = []
     chunks.append(
         {
             "file": path.name,
@@ -364,6 +377,7 @@ def _append_chunk(
             "headers": headers,
             "context_included": selected["included"],
             "context_omitted": selected["omitted"],
+            "related_sources": related_sources,
             "text": numbered,
         }
     )

@@ -1,2 +1,4 @@
 streamlit>=1.40
 psutil>=5.9
+chromadb>=0.5.5
+sentence-transformers>=3.0.0

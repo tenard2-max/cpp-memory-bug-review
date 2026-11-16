@@ -121,6 +121,19 @@ def build_user_prompt(chunks: list[dict], static_report: str, note: str) -> str:
         if headers:
             block += "\n[참조 헤더 Context]\n" + headers
             block += "\n위 헤더 정의를 구조체 멤버와 매크로의 기준으로 사용하라."
+        related = chunk.get("related_sources") or []
+        if related:
+            block += "\n[관련 소스 RAG]"
+            for item in related:
+                file_name = item.get("file_name") or "?"
+                func = item.get("function_name") or ""
+                start = item.get("line_start") or 0
+                end = item.get("line_end") or 0
+                score = item.get("score")
+                score_note = f" score={float(score):.3f}" if isinstance(score, (int, float)) else ""
+                body = str(item.get("text") or "")[:900]
+                block += f"\n// [{file_name}:{start}-{end}] {func}{score_note}\n{body}"
+            block += "\n위 관련 소스는 참고용이다. 현재 창 밖을 단정하지 마라."
         if suspects:
             block += "\n강력 의심 구간:\n" + suspects
         parts.append(block + "\n" + chunk["text"])
