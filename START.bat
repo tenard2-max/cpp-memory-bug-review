@@ -20,7 +20,7 @@ if errorlevel 1 goto NO_OLLAMA
 
 ollama list | findstr /I "qwen2.5-coder:7b" >nul
 if errorlevel 1 (
-  echo ?? ?? qwen2.5-coder:7b ? ?? ????.
+  echo qwen2.5-coder:7b 모델을 받습니다.
   ollama pull qwen2.5-coder:7b
   if errorlevel 1 goto NO_MODEL
 )

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
+import os
 import queue
 import re
 import threading
@@ -29,8 +31,51 @@ DEFAULT_MODEL = "qwen2.5-coder:7b"
 DEFAULT_DEEPSEEK = "qwen2.5-coder:7b"
 DEFAULT_LLAMA = "qwen2.5-coder:7b"
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
-OLLAMA_OPTIONS = {"temperature": 0.0, "num_ctx": 4096, "num_thread": 8, "num_predict": 512}
 PREDICT_CHOICES = [512, 1024, 2048, 4096, 5120, 6144, 7168, 8190]
+
+
+def _commit_free_mib() -> int | None:
+    """Windows가 새 할당에 쓸 수 있는 커밋 여유(MiB). 페이지 파일이 없으면 RAM 한도와 같다."""
+    if os.name != "nt":
+        return None
+
+    class MemoryStatus(ctypes.Structure):
+        _fields_ = (
+            ("dwLength", ctypes.c_ulong),
+            ("dwMemoryLoad", ctypes.c_ulong),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+        )
+
+    status = MemoryStatus()
+    status.dwLength = ctypes.sizeof(status)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        return None
+    return int(status.ullAvailPageFile // (1024 * 1024))
+
+
+def _ollama_request_options(
+    num_ctx: int,
+    num_predict: int,
+    num_gpu: int | None = None,
+    num_batch: int = 512,
+) -> dict:
+    """Ollama /api/chat options. num_ctx와 num_batch는 VRAM 여유에 따라 호출 측에서 넘긴다."""
+    options = {
+        "temperature": 0.0,
+        "num_ctx": int(num_ctx),
+        "num_batch": int(num_batch),
+        "num_thread": 8,
+        "num_predict": int(num_predict),
+    }
+    if num_gpu is not None:
+        options["num_gpu"] = int(num_gpu)
+    return options
 SOURCE_EXTENSIONS = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
 BUG_TYPES = set(OUTPUT_SCHEMA["properties"]["findings"]["items"]["properties"]["bug_type"]["enum"])
 CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2}
@@ -333,9 +378,10 @@ def review_paths(
     deepseek_model: str = DEFAULT_DEEPSEEK,
     llama_model: str = DEFAULT_LLAMA,
     num_predict: int = 512,
+    num_gpu: int | None = None,
+    num_batch: int = 512,
 ) -> dict:
     """분석 모델이 창을 보고, 교차 검증이 켜진 경우에만 두 번째 모델이 다시 본다."""
-    del num_ctx
     prepared = prepare_review(paths, standard, project_root)
     chunks = prepared["chunks"]
     stats = prepared["scan_stats"]
@@ -413,7 +459,10 @@ def review_paths(
                 ollama_url=ollama_url,
                 on_stream=watch("분석 응답 수신", index - 1, chunk),
                 on_wait=on_wait,
+                num_ctx=num_ctx,
                 num_predict=num_predict,
+                num_gpu=num_gpu,
+                num_batch=num_batch,
             )
         except ReviewError as error:
             if "JSON" not in str(error) and "모델 응답" not in str(error):
@@ -436,7 +485,10 @@ def review_paths(
                 ollama_url=ollama_url,
                 on_stream=watch("분석 재검토", index - 1, chunk),
                 on_wait=on_wait,
+                num_ctx=num_ctx,
                 num_predict=num_predict,
+                num_gpu=num_gpu,
+                num_batch=num_batch,
             )
         if reviewed.get("json_repaired"):
             result["stage_notes"].append(
@@ -474,7 +526,10 @@ def review_paths(
                     ollama_url,
                     on_stream=watch("교차 검증 응답 수신", index - 1, chunk),
                     on_wait=on_wait,
+                    num_ctx=num_ctx,
                     num_predict=num_predict,
+                    num_gpu=num_gpu,
+                    num_batch=num_batch,
                 )
             except ReviewError as error:
                 if _model_missing(error):
@@ -514,7 +569,10 @@ def review_paths(
                 f"분석 {total}/{total}창 · 라마 응답 수신 {chars}자",
             ),
             on_wait=on_wait,
+            num_ctx=num_ctx,
             num_predict=num_predict,
+            num_gpu=num_gpu,
+            num_batch=num_batch,
         )
         if polish_note:
             result["stage_notes"].append(polish_note)
@@ -551,7 +609,10 @@ def _ollama_chat(
     user: str,
     ollama_url: str,
     timeout: int,
+    num_ctx: int = 4096,
     num_predict: int = 512,
+    num_gpu: int | None = None,
+    num_batch: int = 512,
     on_stream=None,
     on_wait=None,
 ) -> dict:
@@ -559,8 +620,7 @@ def _ollama_chat(
     base = ollama_base(ollama_url)
     if not ollama_reachable(base):
         raise ReviewError(f"Ollama가 {base} 에서 응답하지 않습니다. Ollama를 실행하세요.")
-    options = dict(OLLAMA_OPTIONS)
-    options["num_predict"] = num_predict
+    options = _ollama_request_options(num_ctx, num_predict, num_gpu, num_batch)
     body = {
         "model": model,
         "stream": True,
@@ -638,6 +698,22 @@ def _ollama_chat(
             raise ReviewError(
                 f"{model} 모델이 이 PC의 Ollama에 없습니다. 검토 화면에서 모델을 받은 뒤 다시 시작하세요."
             ) from error
+        if error.code == 500 and "unsupported toolchain" in detail.lower():
+            raise ReviewError(
+                "GTX 1070(compute 6.1)에서 CUDA 커널을 실행하지 못했습니다. "
+                "설치된 드라이버는 560.94이고, Ollama 0.40은 이 그래픽 카드에 드라이버 570 이상이 필요합니다. "
+                "모델 가중치는 이미 GPU에 올라갔고, 예열 단계에서 커널이 거절됐습니다. "
+                "NVIDIA 드라이버를 570 이상으로 올린 뒤 재부팅하세요. "
+                f"원문: {detail}"
+            ) from error
+        if error.code == 500 and "out of memory" in detail.lower():
+            free_mib = _commit_free_mib()
+            free_text = f"{free_mib}MiB" if free_mib is not None else "확인 불가"
+            raise ReviewError(
+                f"모델 가중치 버퍼를 만들지 못했습니다. 커밋 여유 {free_text}. "
+                f"같은 로드를 바로 다시 시도하지 마세요. "
+                f"원문: {detail}"
+            ) from error
         raise ReviewError(f"Ollama 요청이 실패했습니다 ({error.code}). {detail}") from error
     except (urllib.error.URLError, TimeoutError, OSError) as error:
         raise ReviewError(f"Ollama와 통신하지 못했습니다: {error}") from error
@@ -667,7 +743,10 @@ def cross_check_chunk(
     ollama_url: str,
     on_stream=None,
     on_wait=None,
+    num_ctx: int = 4096,
     num_predict: int = 512,
+    num_gpu: int | None = None,
+    num_batch: int = 512,
 ) -> dict:
     """교차 검증 모델이 같은 창과 1차 결과를 보고 오탐을 빼거나 누락을 보탠다."""
     return _ollama_chat(
@@ -676,7 +755,10 @@ def cross_check_chunk(
         build_cross_prompt(chunk, findings),
         ollama_url,
         timeout,
+        num_ctx=num_ctx,
         num_predict=num_predict,
+        num_gpu=num_gpu,
+                num_batch=num_batch,
         on_stream=on_stream,
         on_wait=on_wait,
     )
@@ -689,7 +771,10 @@ def polish_findings(
     ollama_url: str,
     on_stream=None,
     on_wait=None,
+    num_ctx: int = 4096,
     num_predict: int = 512,
+    num_gpu: int | None = None,
+    num_batch: int = 512,
 ) -> tuple[list[dict], str]:
     """라마가 해설 문장만 다듬는다. 줄 번호와 버그 종류는 파이썬이 유지한다."""
     try:
@@ -699,7 +784,10 @@ def polish_findings(
             build_polish_prompt(findings),
             ollama_url,
             timeout,
+            num_ctx=num_ctx,
             num_predict=num_predict,
+            num_gpu=num_gpu,
+                num_batch=num_batch,
             on_stream=on_stream,
             on_wait=on_wait,
         )
@@ -732,8 +820,9 @@ def review_chunks(
     on_stream=None,
     on_wait=None,
     num_predict: int = 512,
+    num_gpu: int | None = None,
+    num_batch: int = 512,
 ) -> dict:
-    del num_ctx
     rules = load_memory_rules(RULES_PATH)
     picked = _samples_for(chunks)
     if len(chunks) == 1:
@@ -751,7 +840,10 @@ def review_chunks(
         build_user_prompt(chunks, static_report, note),
         ollama_url,
         timeout,
+        num_ctx=num_ctx,
         num_predict=num_predict,
+        num_gpu=num_gpu,
+                num_batch=num_batch,
         on_stream=on_stream,
         on_wait=on_wait,
     )

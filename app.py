@@ -12,7 +12,7 @@ import streamlit as st
 
 from analyzer import cppcheck_path
 from cpu_meter import cpu_label, sample_cpu
-from hardware import RAM_LABELS, VRAM_LABELS, hardware_profile
+from hardware import RAM_LABELS, VRAM_LABELS, hardware_profile, ollama_call_options
 from report import save_reports
 from reviewer import (
     DEFAULT_MODEL,
@@ -22,6 +22,12 @@ from reviewer import (
     installed_models,
     ollama_reachable,
     review_paths,
+)
+from server_status import (
+    collect_server_status,
+    download_remote_file,
+    load_server_config,
+    save_server_config,
 )
 from samples_db import (
     SAMPLES_PATH,
@@ -136,9 +142,9 @@ if "llama_model" not in st.session_state:
     st.session_state.llama_model = DEFAULT_MODEL
 if "num_predict" not in st.session_state:
     st.session_state.num_predict = 1024
-if st.session_state.get("predict_default_version") != 2:
+if st.session_state.get("predict_default_version") != 3:
     st.session_state.num_predict = 1024
-    st.session_state.predict_default_version = 2
+    st.session_state.predict_default_version = 3
 if st.session_state.get("model_defaults_version") != 4:
     st.session_state.model_name = DEFAULT_MODEL
     st.session_state.deepseek_model = DEFAULT_MODEL
@@ -195,7 +201,8 @@ def hardware_dialog() -> None:
         index=list(RAM_LABELS).index(st.session_state.ram),
     )
     chosen = hardware_profile(vram, ram)
-    st.write(f"{chosen['model']} · 컨텍스트 {chosen['num_ctx']}")
+    gpu_note = f" · GPU {chosen['num_gpu']}층" if "num_gpu" in chosen else ""
+    st.write(f"{chosen['model']} · num_ctx {chosen['num_ctx']}{gpu_note}")
     st.caption(chosen["note"])
     installed = installed_models(st.session_state.ollama_url)
     if installed and chosen["model"] not in installed:
@@ -205,6 +212,79 @@ def hardware_dialog() -> None:
         st.session_state.ram = ram
         st.session_state["_pending_model"] = chosen["model"]
         st.rerun()
+
+
+def _server_config_from_state() -> dict:
+    """화면의 노트북 접속 값을 설정 dict로 모은다."""
+    return {
+        "host": str(st.session_state.get("server_host") or ""),
+        "port": int(st.session_state.get("server_port") or 22),
+        "user": str(st.session_state.get("server_user") or ""),
+        "key": str(st.session_state.get("server_key") or ""),
+        "remote_path": str(st.session_state.get("server_remote_path") or ""),
+        "local_dir": str(st.session_state.get("server_local_dir") or ""),
+    }
+
+
+def _ensure_server_settings() -> None:
+    """저장된 노트북 SFTP 접속 정보를 세션에 올린다."""
+    if st.session_state.get("server_settings_version") == 2:
+        return
+    config = load_server_config()
+    st.session_state.server_host = config["host"]
+    st.session_state.server_port = int(config["port"])
+    st.session_state.server_user = config["user"]
+    st.session_state.server_key = config["key"]
+    st.session_state.server_remote_path = config["remote_path"]
+    st.session_state.server_local_dir = config["local_dir"]
+    st.session_state.server_password = ""
+    st.session_state.server_settings_version = 2
+
+
+def _remember_server_status(rows: list[dict]) -> None:
+    st.session_state.server_status_rows = rows
+
+
+@st.dialog("서버 설정")
+def server_dialog() -> None:
+    """노트북 SFTP 서버 접속 정보를 저장하고, 접속과 파일 받기를 확인한다."""
+    _ensure_server_settings()
+    st.caption("이 PC는 SFTP 클라이언트입니다. 노트북에서 OpenSSH 서버가 떠 있어야 파일을 받을 수 있습니다.")
+    st.text_input("노트북 주소", key="server_host")
+    st.number_input("SSH 포트", min_value=1, max_value=65535, step=1, key="server_port")
+    st.text_input("사용자", key="server_user")
+    st.text_input("개인키 파일", key="server_key", help="비우면 ssh-agent 또는 아래 비밀번호를 씁니다.")
+    st.text_input("비밀번호", type="password", key="server_password", help="저장하지 않습니다. 이번 확인에만 씁니다.")
+    st.text_input("원격 파일", key="server_remote_path", help="노트북에 있는 소스 파일 하나. 예: C:/work/sample.cpp")
+    st.text_input("받을 폴더", key="server_local_dir", help="이 PC에 파일을 저장할 폴더입니다.")
+    save_column, check_column, fetch_column = st.columns(3)
+    if save_column.button("저장", type="primary"):
+        try:
+            save_server_config(_server_config_from_state())
+        except OSError as error:
+            st.error(f"설정을 저장하지 못했습니다: {error}")
+        else:
+            st.success("저장했습니다.")
+    if check_column.button("상태 확인"):
+        _remember_server_status(
+            collect_server_status(
+                str(st.session_state.ollama_url),
+                _server_config_from_state(),
+                str(st.session_state.server_password),
+            )
+        )
+    if fetch_column.button("파일 받기"):
+        try:
+            saved = download_remote_file(_server_config_from_state(), str(st.session_state.server_password))
+        except Exception as error:
+            st.error(str(error))
+        else:
+            st.success(f"받았습니다: {saved}")
+    for row in st.session_state.get("server_status_rows") or []:
+        if row["ok"]:
+            st.success(f"{row['name']}: {row['detail']}")
+        else:
+            st.error(f"{row['name']}: {row['detail']}")
 
 
 def render_header_index() -> None:
@@ -438,11 +518,50 @@ def show_cpu() -> None:
 
 show_cpu()
 
-if st.button("옵션"):
+_ensure_server_settings()
+option_column, server_column = st.columns(2)
+if option_column.button("옵션", use_container_width=True):
     hardware_dialog()
+if server_column.button("서버 설정", use_container_width=True):
+    server_dialog()
+
+
+def show_server_status() -> None:
+    """마지막 서버 확인 결과를 보여 준다. 노트북에는 상태 확인을 누를 때만 접속한다."""
+    if "server_status_rows" not in st.session_state:
+        _remember_server_status(
+            collect_server_status(
+                str(st.session_state.ollama_url),
+                _server_config_from_state(),
+                str(st.session_state.get("server_password") or ""),
+            )
+        )
+    rows = st.session_state.server_status_rows
+    columns = st.columns(len(rows))
+    for column, row in zip(columns, rows):
+        if row["ok"]:
+            column.success(f"{row['name']}\n\n{row['detail']}")
+        else:
+            column.error(f"{row['name']}\n\n{row['detail']}")
+
+
+show_server_status()
+_analysis_for_opts = st.session_state.model_name.strip() or DEFAULT_MODEL
+_ollama_opts = ollama_call_options(
+    st.session_state.vram,
+    st.session_state.ram,
+    int(st.session_state.num_predict),
+    _analysis_for_opts,
+)
+_gpu_label = (
+    f", num_gpu {_ollama_opts['num_gpu']}"
+    if "num_gpu" in _ollama_opts
+    else ""
+)
 st.info(
     f"그래픽 {VRAM_LABELS[st.session_state.vram]} · 메인 {RAM_LABELS[st.session_state.ram]} · "
-    f"권장 {profile['model']} · 호출은 temperature 0, num_ctx 4096, num_predict {st.session_state.num_predict}, num_thread 8"
+    f"권장 {profile['model']} · Ollama 호출: temperature 0, num_ctx {_ollama_opts['num_ctx']}, "
+    f"num_predict {_ollama_opts['num_predict']}, num_batch {_ollama_opts.get('num_batch', 512)}{_gpu_label}, num_thread 8"
 )
 # 다른 화면을 갔다 오면 입력칸이 비워진 채 다시 그려진다. 저장값을 다시 넣어 주소가 보이게 한다.
 st.session_state.ollama_url = str(st.session_state.ollama_url).strip() or DEFAULT_OLLAMA_URL
@@ -675,8 +794,10 @@ if st.button("메모리·초기화 버그 검토", type="primary", disabled=not 
                 note,
                 model=st.session_state.model_name.strip() or DEFAULT_MODEL,
                 standard=standard,
-                num_ctx=4096,
-                num_predict=int(st.session_state.num_predict),
+                num_ctx=int(_ollama_opts["num_ctx"]),
+                num_predict=int(_ollama_opts["num_predict"]),
+                num_gpu=_ollama_opts.get("num_gpu"),
+                num_batch=int(_ollama_opts.get("num_batch", 512)),
                 on_progress=on_progress,
                 ollama_url=st.session_state.ollama_url,
                 project_root=project_root,

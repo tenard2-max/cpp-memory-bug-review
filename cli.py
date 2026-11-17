@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from hardware import hardware_profile
+from hardware import hardware_profile, ollama_call_options
 from report import save_reports
 from reviewer import DEFAULT_MODEL, PREDICT_CHOICES, ReviewError, review_paths
 
@@ -37,7 +37,10 @@ def main() -> int:
     parser.add_argument("--num-predict", type=int, default=512, choices=PREDICT_CHOICES)
     args = parser.parse_args()
     profile = hardware_profile(args.vram, args.ram)
-    print(f"모델 {args.model} / Ollama {args.ollama} / {profile['note']}")
+    ollama_opts = ollama_call_options(args.vram, args.ram, args.num_predict, args.model)
+    print(
+        f"모델 {args.model} / Ollama {args.ollama} / num_ctx {ollama_opts['num_ctx']} / {profile['note']}"
+    )
     try:
         def on_progress(percent: float, label: str) -> None:
             print(f"[진행 {percent:.0f}%] {label}")
@@ -47,12 +50,14 @@ def main() -> int:
             args.note,
             model=args.model,
             standard=args.std,
-            num_ctx=4096,
+            num_ctx=int(ollama_opts["num_ctx"]),
+            num_gpu=ollama_opts.get("num_gpu"),
+            num_batch=int(ollama_opts.get("num_batch", 512)),
             on_progress=on_progress,
             ollama_url=args.ollama,
             deepseek_model=args.deepseek,
             llama_model=args.llama,
-            num_predict=args.num_predict,
+            num_predict=int(ollama_opts["num_predict"]),
         )
     except ReviewError as error:
         print(error)

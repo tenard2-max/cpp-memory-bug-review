@@ -1,0 +1,8 @@
+# 이 PC가 노트북 SFTP 서버에서 파일을 받을 때 쓰는 값입니다.
+# 화면의 서버 설정에 그대로 넣습니다. 비밀번호는 저장하지 않습니다.
+host: notebook.example.com
+port: 22
+user: lee
+key: C:\Users\lee\.ssh\id_ed25519
+remote_path: C:/work/sample.cpp
+local_dir: C:\Users\lee\review-inbox
