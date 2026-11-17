@@ -7,7 +7,15 @@ from pathlib import Path
 
 from hardware import hardware_profile, ollama_call_options
 from report import save_reports
-from reviewer import DEFAULT_MODEL, PREDICT_CHOICES, ReviewError, review_paths
+from reviewer import (
+    DEFAULT_MODEL,
+    DEFAULT_THINK_MODE,
+    PREDICT_CHOICES,
+    THINK_MODES,
+    ReviewError,
+    is_qwen3_model,
+    review_paths,
+)
 
 BUG_LABELS = {
     "use_after_free": "해제 후 사용",
@@ -26,10 +34,16 @@ BUG_LABELS = {
 def main() -> int:
     parser = argparse.ArgumentParser(description="C/C++ 메모리 버그와 초기화 버그를 로컬 모델로 검토합니다.")
     parser.add_argument("paths", nargs="+", help="소스 파일 또는 폴더")
-    parser.add_argument("--vram", default="8", choices=["lt1", "8", "20"], help="lt1은 1GB 미만, 8, 20")
+    parser.add_argument("--vram", default="8", choices=["lt1", "8", "11", "20"], help="lt1은 1GB 미만, 8, 11, 20")
     parser.add_argument("--ram", default="16", choices=["16", "32"])
     parser.add_argument("--std", default="c++03", choices=["c++03", "c++17"])
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--think-mode",
+        default=DEFAULT_THINK_MODE,
+        choices=list(THINK_MODES),
+        help="qwen3:14b 전용. 기본 FAST(/no_think).",
+    )
     parser.add_argument("--deepseek", default="", help="비우면 교차 검증을 하지 않습니다.")
     parser.add_argument("--llama", default=DEFAULT_MODEL)
     parser.add_argument("--ollama", default="http://127.0.0.1:11434")
@@ -38,6 +52,8 @@ def main() -> int:
     args = parser.parse_args()
     profile = hardware_profile(args.vram, args.ram)
     ollama_opts = ollama_call_options(args.vram, args.ram, args.num_predict, args.model)
+    if is_qwen3_model(args.model):
+        ollama_opts["num_ctx"] = max(int(ollama_opts["num_ctx"]), 16384)
     print(
         f"모델 {args.model} / Ollama {args.ollama} / num_ctx {ollama_opts['num_ctx']} / {profile['note']}"
     )
@@ -58,6 +74,7 @@ def main() -> int:
             deepseek_model=args.deepseek,
             llama_model=args.llama,
             num_predict=int(ollama_opts["num_predict"]),
+            think_mode=args.think_mode,
         )
     except ReviewError as error:
         print(error)

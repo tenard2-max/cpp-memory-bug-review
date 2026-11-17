@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import ctypes
 import json
-import os
 import queue
 import re
 import threading
@@ -28,63 +26,86 @@ from samples_db import format_samples, select_samples
 from whitelist import format_whitelist, load_whitelist
 
 DEFAULT_MODEL = "qwen2.5-coder:7b"
+QWEN3_MODEL = "qwen3:14b"
 DEFAULT_DEEPSEEK = "qwen2.5-coder:7b"
 DEFAULT_LLAMA = "qwen2.5-coder:7b"
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
+OLLAMA_OPTIONS = {"temperature": 0.0, "num_ctx": 4096, "num_thread": 8, "num_predict": 512}
 PREDICT_CHOICES = [512, 1024, 2048, 4096, 5120, 6144, 7168, 8190]
-
-
-def _commit_free_mib() -> int | None:
-    """Windows가 새 할당에 쓸 수 있는 커밋 여유(MiB). 페이지 파일이 없으면 RAM 한도와 같다."""
-    if os.name != "nt":
-        return None
-
-    class MemoryStatus(ctypes.Structure):
-        _fields_ = (
-            ("dwLength", ctypes.c_ulong),
-            ("dwMemoryLoad", ctypes.c_ulong),
-            ("ullTotalPhys", ctypes.c_ulonglong),
-            ("ullAvailPhys", ctypes.c_ulonglong),
-            ("ullTotalPageFile", ctypes.c_ulonglong),
-            ("ullAvailPageFile", ctypes.c_ulonglong),
-            ("ullTotalVirtual", ctypes.c_ulonglong),
-            ("ullAvailVirtual", ctypes.c_ulonglong),
-            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-        )
-
-    status = MemoryStatus()
-    status.dwLength = ctypes.sizeof(status)
-    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-        return None
-    return int(status.ullAvailPageFile // (1024 * 1024))
-
-
-def _ollama_request_options(
-    num_ctx: int,
-    num_predict: int,
-    num_gpu: int | None = None,
-    num_batch: int = 512,
-) -> dict:
-    """Ollama /api/chat options. num_ctx와 num_batch는 VRAM 여유에 따라 호출 측에서 넘긴다."""
-    options = {
-        "temperature": 0.0,
-        "num_ctx": int(num_ctx),
-        "num_batch": int(num_batch),
-        "num_thread": 8,
-        "num_predict": int(num_predict),
-    }
-    if num_gpu is not None:
-        options["num_gpu"] = int(num_gpu)
-    return options
+# FAST=/no_think 기본. AUTO는 의심 시에만 Thinking.
+THINK_MODES = ("FAST", "AUTO", "DEEP")
+DEFAULT_THINK_MODE = "FAST"
 SOURCE_EXTENSIONS = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
 BUG_TYPES = set(OUTPUT_SCHEMA["properties"]["findings"]["items"]["properties"]["bug_type"]["enum"])
 CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2}
 MAX_FILES = 30
 RULES_PATH = Path(__file__).with_name("memory_rules.txt")
+THINK_LOG_DIR = Path(__file__).with_name("logs") / "think"
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
 
 
 class ReviewError(RuntimeError):
     """검토 요청을 모델까지 보내지 못했을 때 사용한다."""
+
+
+def is_qwen3_model(model: str) -> bool:
+    """Qwen3 계열이면 Hybrid Thinking 옵션을 적용한다."""
+    name = (model or "").strip().lower()
+    return name.startswith("qwen3:") or name.startswith("qwen3-")
+
+
+def normalize_think_mode(mode: str | None) -> str:
+    text = str(mode or DEFAULT_THINK_MODE).strip().upper()
+    return text if text in THINK_MODES else DEFAULT_THINK_MODE
+
+
+def qwen3_call_preset(stage: str) -> dict:
+    """FAST=/no_think, DEEP=Thinking 프리셋. 모델명은 항상 qwen3:14b 하나다."""
+    if stage == "DEEP":
+        return {
+            "think": True,
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "num_ctx": 16384,
+            "stage": "DEEP_TRACE",
+        }
+    return {
+        "think": False,
+        "temperature": 0.1,
+        "top_p": 0.8,
+        "num_ctx": 16384,
+        "stage": "FAST_SCAN",
+    }
+
+
+def strip_think_blocks(text: str) -> tuple[str, str]:
+    """응답에서 <think> 블록을 분리한다. (본문, think 텍스트)."""
+    raw = text or ""
+    thoughts = [block.strip() for block in _THINK_BLOCK.findall(raw) if block.strip()]
+    cleaned = _THINK_BLOCK.sub("", raw).strip()
+    return cleaned, "\n\n".join(thoughts)
+
+
+def save_think_log(chunk: dict, stage: str, think_text: str) -> str:
+    """심층 추론 혼잣말을 logs/think 에 남긴다."""
+    if not think_text.strip():
+        return ""
+    THINK_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    safe_file = re.sub(r"[^\w.-]+", "_", str(chunk.get("file") or "chunk"))[:80]
+    path = THINK_LOG_DIR / f"{stamp}_{safe_file}_{chunk.get('start', 0)}_{stage}.log"
+    path.write_text(
+        (
+            f"file={chunk.get('file')}\n"
+            f"function={chunk.get('function_name')}\n"
+            f"range={chunk.get('start')}-{chunk.get('end')}\n"
+            f"stage={stage}\n\n"
+            f"{think_text.strip()}\n"
+        ),
+        encoding="utf-8",
+        errors="replace",
+    )
+    return str(path)
 
 
 def is_source(path: Path) -> bool:
@@ -105,7 +126,7 @@ def list_sources(paths: list[Path]) -> list[Path]:
 
 
 def extract_json(text: str) -> dict:
-    stripped = text.strip()
+    stripped, _think = strip_think_blocks(text.strip())
     if stripped.startswith("```"):
         lines = stripped.splitlines()[1:]
         if lines and lines[-1].strip() == "```":
@@ -232,13 +253,28 @@ def prepare_review(paths: list[Path], standard: str = "c++03", project_root: Pat
             if path.is_dir():
                 root = path
                 break
+    source_index = {"count": 0, "skipped": True}
+    if root is not None:
+        try:
+            from samples_db import vector_search_enabled
+            from vector_store import ensure_source_chunk_index, is_available
+
+            if vector_search_enabled() and is_available():
+                source_index = ensure_source_chunk_index(root)
+        except Exception as error:  # noqa: BLE001
+            source_index = {"count": 0, "error": str(error)}
     chunks, scan_stats = build_chunks(files, issues, root)
+    scan_stats = dict(scan_stats)
+    scan_stats["source_rag_chunks"] = int(source_index.get("count") or 0)
+    if source_index.get("error"):
+        scan_stats["source_rag_error"] = str(source_index["error"])
     return {
         "files": files,
         "issues": issues,
         "report": report,
         "chunks": chunks,
         "scan_stats": scan_stats,
+        "source_index": source_index,
     }
 
 
@@ -378,10 +414,13 @@ def review_paths(
     deepseek_model: str = DEFAULT_DEEPSEEK,
     llama_model: str = DEFAULT_LLAMA,
     num_predict: int = 512,
+    think_mode: str = DEFAULT_THINK_MODE,
     num_gpu: int | None = None,
     num_batch: int = 512,
 ) -> dict:
     """분석 모델이 창을 보고, 교차 검증이 켜진 경우에만 두 번째 모델이 다시 본다."""
+    mode = normalize_think_mode(think_mode)
+    use_qwen3 = is_qwen3_model(model)
     prepared = prepare_review(paths, standard, project_root)
     chunks = prepared["chunks"]
     stats = prepared["scan_stats"]
@@ -394,7 +433,15 @@ def review_paths(
         "scan_stats": stats,
         "stage_notes": [],
         "unconfirmed": False,
+        "think_mode": mode if use_qwen3 else "",
+        "think_logs": [],
+        "executed_stages": [],
     }
+    if use_qwen3:
+        result["stage_notes"].append(
+            f"Qwen3 추론 모드 {mode} · 모델 {model} · "
+            + ("think=false 고정(FAST)" if mode == "FAST" else "AUTO=의심 시 Thinking" if mode == "AUTO" else "Thinking 강제(DEEP)")
+        )
     total = len(chunks)
     last_pulse = {"percent": 0.0, "label": ""}
 
@@ -449,21 +496,32 @@ def review_paths(
             _percent(index - 1, total, 0.02),
             _analysis_label(stats, index, total, "분석 요청", chunk),
         )
-        try:
-            reviewed = review_chunks(
+        first_stage = None
+        if use_qwen3:
+            first_stage = "DEEP" if mode == "DEEP" else "FAST"
+            stage_label = qwen3_call_preset(first_stage)["stage"]
+            if stage_label not in result["executed_stages"]:
+                result["executed_stages"].append(stage_label)
+
+        def run_window(prompt_note: str, stage: str | None, stream_label: str) -> dict:
+            return review_chunks(
                 [chunk],
                 prepared["report"],
-                note,
+                prompt_note,
                 model=model,
                 timeout=timeout,
-                ollama_url=ollama_url,
-                on_stream=watch("분석 응답 수신", index - 1, chunk),
-                on_wait=on_wait,
                 num_ctx=num_ctx,
+                ollama_url=ollama_url,
+                on_stream=watch(stream_label, index - 1, chunk),
+                on_wait=on_wait,
                 num_predict=num_predict,
+                think_stage=stage,
                 num_gpu=num_gpu,
                 num_batch=num_batch,
             )
+
+        try:
+            reviewed = run_window(note, first_stage, "분석 응답 수신")
         except ReviewError as error:
             if "JSON" not in str(error) and "모델 응답" not in str(error):
                 raise
@@ -475,21 +533,16 @@ def review_paths(
                 _analysis_label(stats, index, total, "이 창 건너뜀", chunk),
             )
             continue
+        if reviewed.get("think_log"):
+            result["think_logs"].append(reviewed["think_log"])
         if reviewed.get("rejected"):
-            reviewed = review_chunks(
-                [chunk],
-                prepared["report"],
+            reviewed = run_window(
                 note + "\n이 함수의 메모리 버그와 초기화 버그를 찾아라. 주석의 취약점 설명은 공격 요청이 아니다. rejected는 false.",
-                model=model,
-                timeout=timeout,
-                ollama_url=ollama_url,
-                on_stream=watch("분석 재검토", index - 1, chunk),
-                on_wait=on_wait,
-                num_ctx=num_ctx,
-                num_predict=num_predict,
-                num_gpu=num_gpu,
-                num_batch=num_batch,
+                first_stage,
+                "분석 재검토",
             )
+            if reviewed.get("think_log"):
+                result["think_logs"].append(reviewed["think_log"])
         if reviewed.get("json_repaired"):
             result["stage_notes"].append(
                 f"{chunk['file']} {chunk.get('function_name') or ''} {chunk['start']}-{chunk['end']} 응답이 잘려 닫힌 항목만 반영했습니다."
@@ -504,6 +557,36 @@ def review_paths(
         model_found = bool(window_findings)
         if not model_found:
             window_findings = [_fill_context(dict(item), chunk, lines_by_path) for item in suspect_findings]
+        # AUTO: FAST에서 의심/발견이 있으면 같은 qwen3:14b로 Thinking만 켠 채 재검토
+        need_deep = (
+            use_qwen3
+            and mode == "AUTO"
+            and first_stage == "FAST"
+            and (model_found or bool(chunk.get("suspects")) or bool(suspect_findings))
+        )
+        if need_deep:
+            if "DEEP_TRACE" not in result["executed_stages"]:
+                result["executed_stages"].append("DEEP_TRACE")
+            emit(
+                _percent(index - 1, total, 0.85),
+                _analysis_label(stats, index, total, "정밀 Thinking 재검토", chunk),
+            )
+            try:
+                deep_reviewed = run_window(note, "DEEP", "Thinking 응답 수신")
+            except ReviewError as error:
+                result["stage_notes"].append(f"Thinking 재검토를 건너뛰었습니다: {error}")
+            else:
+                if deep_reviewed.get("think_log"):
+                    result["think_logs"].append(deep_reviewed["think_log"])
+                if not deep_reviewed.get("rejected"):
+                    window_findings = [
+                        _fill_context(finding, chunk, lines_by_path) for finding in deep_reviewed["findings"]
+                    ]
+                    model_found = bool(window_findings)
+                    if not model_found:
+                        window_findings = [
+                            _fill_context(dict(item), chunk, lines_by_path) for item in suspect_findings
+                        ]
         weak_model = "3b" in model.lower()
         cross_model = deepseek_model.strip()
         needs_cross = bool(cross_model) and (
@@ -526,10 +609,7 @@ def review_paths(
                     ollama_url,
                     on_stream=watch("교차 검증 응답 수신", index - 1, chunk),
                     on_wait=on_wait,
-                    num_ctx=num_ctx,
                     num_predict=num_predict,
-                    num_gpu=num_gpu,
-                    num_batch=num_batch,
                 )
             except ReviewError as error:
                 if _model_missing(error):
@@ -569,10 +649,7 @@ def review_paths(
                 f"분석 {total}/{total}창 · 라마 응답 수신 {chars}자",
             ),
             on_wait=on_wait,
-            num_ctx=num_ctx,
             num_predict=num_predict,
-            num_gpu=num_gpu,
-            num_batch=num_batch,
         )
         if polish_note:
             result["stage_notes"].append(polish_note)
@@ -609,28 +686,51 @@ def _ollama_chat(
     user: str,
     ollama_url: str,
     timeout: int,
-    num_ctx: int = 4096,
     num_predict: int = 512,
-    num_gpu: int | None = None,
-    num_batch: int = 512,
     on_stream=None,
     on_wait=None,
+    *,
+    think: bool | None = None,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    num_ctx: int | None = None,
+    num_gpu: int | None = None,
+    num_batch: int | None = None,
+    chunk: dict | None = None,
+    stage_name: str = "",
 ) -> dict:
     """스키마를 강제해 한 모델을 호출하고, 응답이 쌓이는 동안 글자 수를 알린다."""
     base = ollama_base(ollama_url)
     if not ollama_reachable(base):
         raise ReviewError(f"Ollama가 {base} 에서 응답하지 않습니다. Ollama를 실행하세요.")
-    options = _ollama_request_options(num_ctx, num_predict, num_gpu, num_batch)
+    options = dict(OLLAMA_OPTIONS)
+    options["num_predict"] = num_predict
+    if temperature is not None:
+        options["temperature"] = float(temperature)
+    if top_p is not None:
+        options["top_p"] = float(top_p)
+    if num_ctx is not None:
+        options["num_ctx"] = int(num_ctx)
+    if num_batch is not None:
+        options["num_batch"] = int(num_batch)
+    if num_gpu is not None:
+        options["num_gpu"] = int(num_gpu)
+    # Qwen3 FAST는 think=false 로 혼잣말을 끄고 즉답한다. DEEP만 Thinking을 연다.
+    prompt_user = user
+    if think is False and "/no_think" not in user:
+        prompt_user = user.rstrip() + "\n\n/no_think"
     body = {
         "model": model,
         "stream": True,
         "format": OUTPUT_SCHEMA,
         "messages": [
             {"role": "system", "content": system},
-            {"role": "user", "content": user},
+            {"role": "user", "content": prompt_user},
         ],
         "options": options,
     }
+    if think is not None:
+        body["think"] = bool(think)
     request = urllib.request.Request(
         base + "/api/chat",
         data=json.dumps(body).encode("utf-8"),
@@ -698,22 +798,6 @@ def _ollama_chat(
             raise ReviewError(
                 f"{model} 모델이 이 PC의 Ollama에 없습니다. 검토 화면에서 모델을 받은 뒤 다시 시작하세요."
             ) from error
-        if error.code == 500 and "unsupported toolchain" in detail.lower():
-            raise ReviewError(
-                "GTX 1070(compute 6.1)에서 CUDA 커널을 실행하지 못했습니다. "
-                "설치된 드라이버는 560.94이고, Ollama 0.40은 이 그래픽 카드에 드라이버 570 이상이 필요합니다. "
-                "모델 가중치는 이미 GPU에 올라갔고, 예열 단계에서 커널이 거절됐습니다. "
-                "NVIDIA 드라이버를 570 이상으로 올린 뒤 재부팅하세요. "
-                f"원문: {detail}"
-            ) from error
-        if error.code == 500 and "out of memory" in detail.lower():
-            free_mib = _commit_free_mib()
-            free_text = f"{free_mib}MiB" if free_mib is not None else "확인 불가"
-            raise ReviewError(
-                f"모델 가중치 버퍼를 만들지 못했습니다. 커밋 여유 {free_text}. "
-                f"같은 로드를 바로 다시 시도하지 마세요. "
-                f"원문: {detail}"
-            ) from error
         raise ReviewError(f"Ollama 요청이 실패했습니다 ({error.code}). {detail}") from error
     except (urllib.error.URLError, TimeoutError, OSError) as error:
         raise ReviewError(f"Ollama와 통신하지 못했습니다: {error}") from error
@@ -721,18 +805,32 @@ def _ollama_chat(
         raise
     except Exception as error:
         raise ReviewError(f"Ollama와 통신하지 못했습니다: {error}") from error
-    content = "".join(parts) or "".join(thinking)
-    if timed_out and content.strip():
+    content = "".join(parts)
+    api_thinking = "".join(thinking)
+    if not content.strip() and api_thinking.strip():
+        content = api_thinking
+    cleaned, tagged_think = strip_think_blocks(content)
+    think_text = "\n\n".join(part for part in (api_thinking, tagged_think) if part.strip())
+    think_log = ""
+    if think_text and chunk is not None:
+        think_log = save_think_log(chunk, stage_name or "THINK", think_text)
+    parse_source = cleaned or content
+    if timed_out and parse_source.strip():
         try:
-            partial = extract_json(content)
+            partial = extract_json(parse_source)
         except ReviewError:
             partial = None
         if partial is not None:
             partial["json_repaired"] = True
+            if think_log:
+                partial["think_log"] = think_log
             return partial
     if timed_out:
         raise ReviewError("Ollama 응답 대기 시간이 초과되었습니다.")
-    return extract_json(content)
+    parsed = extract_json(parse_source)
+    if think_log:
+        parsed["think_log"] = think_log
+    return parsed
 
 
 def cross_check_chunk(
@@ -743,10 +841,7 @@ def cross_check_chunk(
     ollama_url: str,
     on_stream=None,
     on_wait=None,
-    num_ctx: int = 4096,
     num_predict: int = 512,
-    num_gpu: int | None = None,
-    num_batch: int = 512,
 ) -> dict:
     """교차 검증 모델이 같은 창과 1차 결과를 보고 오탐을 빼거나 누락을 보탠다."""
     return _ollama_chat(
@@ -755,10 +850,7 @@ def cross_check_chunk(
         build_cross_prompt(chunk, findings),
         ollama_url,
         timeout,
-        num_ctx=num_ctx,
         num_predict=num_predict,
-        num_gpu=num_gpu,
-                num_batch=num_batch,
         on_stream=on_stream,
         on_wait=on_wait,
     )
@@ -771,10 +863,7 @@ def polish_findings(
     ollama_url: str,
     on_stream=None,
     on_wait=None,
-    num_ctx: int = 4096,
     num_predict: int = 512,
-    num_gpu: int | None = None,
-    num_batch: int = 512,
 ) -> tuple[list[dict], str]:
     """라마가 해설 문장만 다듬는다. 줄 번호와 버그 종류는 파이썬이 유지한다."""
     try:
@@ -784,10 +873,7 @@ def polish_findings(
             build_polish_prompt(findings),
             ollama_url,
             timeout,
-            num_ctx=num_ctx,
             num_predict=num_predict,
-            num_gpu=num_gpu,
-                num_batch=num_batch,
             on_stream=on_stream,
             on_wait=on_wait,
         )
@@ -820,6 +906,7 @@ def review_chunks(
     on_stream=None,
     on_wait=None,
     num_predict: int = 512,
+    think_stage: str | None = None,
     num_gpu: int | None = None,
     num_batch: int = 512,
 ) -> dict:
@@ -831,19 +918,40 @@ def review_chunks(
                 "id": item["id"],
                 "category": item["category"],
                 "is_false_positive": item["is_false_positive"],
+                "select_reason": item.get("_select_reason") or "keyword",
+                "select_score": item.get("_select_score"),
+                "vector_score": item.get("_vector_score"),
+                "keyword_score": item.get("_keyword_score"),
             }
             for item in picked
         ]
+    call_think = None
+    call_temperature = None
+    call_top_p = None
+    call_ctx = num_ctx
+    stage_name = "STANDARD"
+    if is_qwen3_model(model) and think_stage in {"FAST", "DEEP"}:
+        preset = qwen3_call_preset(think_stage)
+        call_think = bool(preset["think"])
+        call_temperature = float(preset["temperature"])
+        call_top_p = float(preset["top_p"])
+        call_ctx = int(preset["num_ctx"])
+        stage_name = str(preset["stage"])
     return _ollama_chat(
         model,
         build_system_prompt(rules, format_samples(picked), format_whitelist(load_whitelist())),
         build_user_prompt(chunks, static_report, note),
         ollama_url,
         timeout,
-        num_ctx=num_ctx,
         num_predict=num_predict,
-        num_gpu=num_gpu,
-                num_batch=num_batch,
         on_stream=on_stream,
         on_wait=on_wait,
+        think=call_think,
+        temperature=call_temperature,
+        top_p=call_top_p,
+        num_ctx=call_ctx,
+        num_gpu=num_gpu,
+        num_batch=num_batch,
+        chunk=chunks[0] if len(chunks) == 1 else None,
+        stage_name=stage_name,
     )

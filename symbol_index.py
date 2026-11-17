@@ -191,6 +191,19 @@ def build_index(full: bool = False) -> dict:
     status["updated"] = updated
     status["unchanged"] = unchanged
     status["missing_roots"] = missing_roots
+    # SQLite 갱신 뒤 Chroma header_symbols 도 같이 맞춘다 (벡터 검색 ON일 때).
+    try:
+        from samples_db import vector_search_enabled
+        from vector_store import is_available, rebuild_header_symbol_index
+
+        if vector_search_enabled() and is_available():
+            chroma = rebuild_header_symbol_index()
+            status["chroma_headers"] = int(chroma.get("count") or 0)
+        else:
+            status["chroma_headers"] = 0
+    except Exception as error:  # noqa: BLE001
+        status["chroma_headers"] = 0
+        status["chroma_error"] = str(error)
     return status
 
 
@@ -287,7 +300,7 @@ def extract_symbols(text: str, include_inline_bodies: bool) -> list[dict]:
 
 
 def select_context(chunk_text: str, extra_blocks: list[dict] | None = None) -> dict:
-    """인덱스에서 쓰는 심볼을 고르고, 예산이 남으면 정규식 결과를 뒤에 붙인다."""
+    """인덱스에서 쓰는 심볼을 고르고, 예산이 남으면 벡터·정규식 결과를 뒤에 붙인다."""
     budget = load_config()["context_token_budget"]
     names = [token for token in IDENT.findall(chunk_text) if token not in PRIMITIVE]
     frequency: dict[str, int] = {}
@@ -300,19 +313,71 @@ def select_context(chunk_text: str, extra_blocks: list[dict] | None = None) -> d
         with _connect() as connection:
             _collect_exact(connection, frequency, chosen, seen, depth=0)
     ranked = sorted(chosen, key=lambda item: (item["depth"], -item["hits"], item["symbol_name"]))
+    # 벡터 검색이 켜져 있으면 exact 후보를 BGE-M3 유사도로 예산 안 순위를 다시 잡는다.
+    vector_ranked = False
+    vector_merged = False
+    try:
+        from samples_db import vector_search_enabled
+        from vector_store import is_available, rank_by_similarity
+
+        if vector_search_enabled() and is_available() and ranked:
+            ranked = rank_by_similarity(chunk_text, ranked, text_key="text")
+            vector_ranked = True
+    except Exception:
+        vector_ranked = False
     kept: list[dict] = []
     omitted: list[str] = []
     used_tokens = 0
     covered: set[str] = set()
     for item in ranked:
         tokens = estimate_tokens(item["text"])
-        label = f"{item['symbol_name']} ({item['kind']}, exact)"
+        how = "exact+vector" if vector_ranked else "exact"
+        label = f"{item['symbol_name']} ({item['kind']}, {how})"
         if used_tokens + tokens > budget:
             omitted.append(label)
             continue
         used_tokens += tokens
-        kept.append(item)
+        kept.append({**item, "_how": how})
         covered.add(item["symbol_name"])
+    # exact에 없는 심볼을 Chroma header_symbols 에서 보충한다.
+    try:
+        from samples_db import vector_search_enabled
+        from vector_store import is_available, query_similar_headers
+
+        if vector_search_enabled() and is_available() and used_tokens < budget:
+            for hit in query_similar_headers(chunk_text, limit=12):
+                name = hit.get("symbol_name") or ""
+                if not name or name in covered:
+                    continue
+                text = str(hit.get("text") or "")
+                if not text.strip():
+                    continue
+                key = (name, str(hit.get("file_path") or ""), int(hit.get("line_start") or 0))
+                if key in seen:
+                    continue
+                tokens = estimate_tokens(text)
+                label = f"{name} ({hit.get('kind') or 'symbol'}, chroma)"
+                if used_tokens + tokens > budget:
+                    omitted.append(label)
+                    continue
+                used_tokens += tokens
+                seen.add(key)
+                covered.add(name)
+                vector_merged = True
+                kept.append(
+                    {
+                        "symbol_name": name,
+                        "kind": hit.get("kind") or "",
+                        "file_path": hit.get("file_path") or "",
+                        "line_start": int(hit.get("line_start") or 0),
+                        "line_end": int(hit.get("line_end") or 0),
+                        "text": text,
+                        "_how": "chroma",
+                        "_vector_score": float(hit.get("score") or 0.0),
+                    }
+                )
+    except Exception:
+        pass
     fallback_blocks = []
     for block in extra_blocks or []:
         if block["name"] in covered:
@@ -328,9 +393,12 @@ def select_context(chunk_text: str, extra_blocks: list[dict] | None = None) -> d
     parts = []
     included = []
     for item in kept:
-        file_name = Path(item["file_path"]).name
+        file_name = Path(item["file_path"]).name if item.get("file_path") else "?"
+        how = item.get("_how") or ("exact+vector" if vector_ranked else "exact")
+        score = item.get("_vector_score")
+        score_note = f" score={float(score):.3f}" if isinstance(score, (int, float)) else ""
         parts.append(f"// [{file_name}:{item['line_start']}] {item['symbol_name']}\n{item['text']}")
-        included.append(f"{item['symbol_name']} {file_name}:{item['line_start']} exact")
+        included.append(f"{item['symbol_name']} {file_name}:{item['line_start']} {how}{score_note}")
     for block in fallback_blocks:
         parts.append(block["text"])
         included.append(f"{block['name']} regex")
@@ -339,6 +407,8 @@ def select_context(chunk_text: str, extra_blocks: list[dict] | None = None) -> d
         "included": included,
         "omitted": omitted,
         "used_index": used_index,
+        "vector_ranked": vector_ranked,
+        "vector_merged": vector_merged,
     }
 
 

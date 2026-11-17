@@ -1,0 +1,14 @@
+Skip to main content
+Deploy
+AttributeError: module 'ctypes' has no attribute 'WINFUNCTYPE'
+Traceback:
+File "/workspace/vmtest/cpp/app.py", line 16, in <module>
+    from sys_panel import render_command_panel, sample_host
+File "/workspace/vmtest/cpp/sys_panel.py", line 12, in <module>
+    from gpu_meter import GpuSnapshot, sample_gpus
+File "/workspace/vmtest/cpp/gpu_meter.py", line 108, in <module>
+    @ctypes.WINFUNCTYPE(c_void_p, c_int)
+     ^^^^^^^^^^^^^^^^^^
+Copy
+Ask Google
+Ask ChatGPT

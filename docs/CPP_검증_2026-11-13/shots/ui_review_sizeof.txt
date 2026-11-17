@@ -1,0 +1,91 @@
+Skip to main content
+Deploy
+
+C++ 메모리·초기화 버그 검토
+
+코드 검토
+
+헤더 인덱스
+
+샘플 학습 관리
+
+초기화 화이트리스트
+
+옵션
+
+[SYS_INIT] :: CPP_MEMORY_BUG_REVIEW
+TARGET: LOCAL_OLLAMA_ONLINE
+MODEL: qwen2.5-coder:7b  |  DEPLOYMENT: LOCAL_ONLY · NO_UPLOAD  |  VRAM_PROFILE: 8GB  |  SHARED_MEM: OFF
+GPU_0 (미검출)
+온도
+N/A
+VRAM / 전용
+8GB
+사용률
+N/A
+HOST_SYS RAM 16GB
+시스템 CPU
+7%
+시스템 RAM
+12.7/15.6 GB (81%)
+Ollama CPU
+없음
+CPU와 시스템 공유 메모리 (SHARED_RAM)
+81% · 12.7 GB
+런타임 부하 시계열 (CPU%)
+7% · model qwen2.5-coder:7b · GPU temp N/A
+TASK: CPP_MEMORY_INIT_REVIEW [LOCAL] STABLE
+GPU_ENUM: 표시할 그래픽 장치를 찾지 못했습니다.
+[GPU_ENUM: 표시할 그래픽 장치를 찾지 못했습니다.]
+상태
+
+Ollama 연결됨
+
+Ollama CPU
+
+없음
+
+그래픽 8GB · 메인 16GB · 권장 qwen2.5-coder:7b · 호출은 temperature 0, num_ctx 4096, num_predict 1024, num_thread 8
+
+Ollama 주소
+
+검토 작업
+
+소스 파일
+
+K08_poi...sizeof.cpp
+289.0B
+add icon
+add
+
+프로젝트 루트 폴더
+
+폴더 선택
+
+요청
+
+사내 SAFE_FREE 같은 매크로는 memory_rules.txt에 적습니다. 명령줄은 py -3 cli.py 파일.cpp 입니다.
+
+메모리·초기화 버그 검토
+
+함수 2개 중 소거 0개, 분석 창 2개
+
+모델에 넘긴 함수 조각 2개
+
+keyboard_arrow_right
+
+cppcheck
+
+keyboard_arrow_right
+
+모델에 넘긴 코드
+
+리포트 저장: /workspace/vmtest/cpp/reports
+
+마크다운 받기
+
+CSV 받기
+
+keyboard_arrow_right
+
+K08_pointer_sizeof.cpp:5 ClearPacket

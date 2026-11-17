@@ -4,7 +4,9 @@ __pycache__/
 venv/
 data/*.sqlite
 data/*.sqlite-journal
+data/chroma/
 *.tmp
+logs/
 config/remote.yaml
 config/server.json
 inbox/
