@@ -5,7 +5,11 @@ venv/
 data/*.sqlite
 data/*.sqlite-journal
 data/chroma/
+data/preprocessed/
+data/security/
 *.tmp
+*.pptx.bak
+~$*
 logs/
 config/remote.yaml
 config/server.json

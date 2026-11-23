@@ -7,6 +7,12 @@ import shutil
 import subprocess
 import tempfile
 
+# 다른 라이브러리 import 전에 텔레메트리·HF 오프라인 차단을 건다.
+from security_audit import apply_local_security_env, ensure_streamlit_config
+
+apply_local_security_env()
+ensure_streamlit_config()
+
 import pandas as pd
 import streamlit as st
 
@@ -61,6 +67,23 @@ def _choose_project_folder() -> str:
     except Exception:
         return ""
     return selected or ""
+
+
+def _choose_files(title: str, patterns: list[tuple[str, str]], *, max_count: int = 5) -> list[str]:
+    """파일 다중 선택(최대 max_count). 실패 시 빈 목록."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        window = tk.Tk()
+        window.withdraw()
+        window.attributes("-topmost", True)
+        selected = filedialog.askopenfilenames(title=title, filetypes=patterns)
+        window.destroy()
+    except Exception:
+        return []
+    paths = [str(item) for item in (selected or [])][:max_count]
+    return paths
 
 
 def _ollama_exe() -> str:
@@ -118,6 +141,21 @@ BUG_LABELS = {
     "other_memory": "기타 메모리",
 }
 SCREEN_OPTIONS = ["코드 검토", "헤더 인덱스", "샘플 학습 관리", "초기화 화이트리스트"]
+DIALOG_FLAGS = (
+    "_open_options",
+    "_open_server",
+    "_open_security",
+    "_open_header_prep",
+    "show_done_dialog",
+)
+
+
+def _close_all_dialogs(*, keep: str | None = None) -> None:
+    """메뉴/화면 전환 때 이전 다이얼로그가 다시 뜨지 않게 닫는다."""
+    for key in DIALOG_FLAGS:
+        if keep and key == keep:
+            continue
+        st.session_state[key] = False
 
 st.set_page_config(page_title="C++ 메모리·초기화 버그 검토", layout="wide")
 st.markdown(
@@ -465,6 +503,8 @@ with st.container(key="app_header", border=False):
                 type="primary" if selected else "secondary",
                 use_container_width=True,
             ):
+                # 화면 바꿀 때 옵션/서버/보안/전처리 창을 모두 닫아 이전 창 잔존을 막는다.
+                _close_all_dialogs()
                 st.session_state.screen = name
                 st.rerun()
         if st.button("옵션", key="nav-option", type="secondary", use_container_width=True):
@@ -480,12 +520,21 @@ with st.container(key="app_header", border=False):
             st.session_state["dlg_num_predict"] = st.session_state.get("num_predict", 1024)
             st.session_state["dlg_cpp_standard"] = st.session_state.get("cpp_standard", "c++03")
             st.session_state["dlg_vector_search"] = bool(st.session_state.get("vector_search", True))
+            _close_all_dialogs(keep="_open_options")
             st.session_state["_open_options"] = True
             st.rerun()
         if st.button("서버 설정", key="nav-server", type="secondary", use_container_width=True):
+            _close_all_dialogs(keep="_open_server")
             st.session_state["_open_server"] = True
             st.rerun()
+        if st.button("보안점검", key="nav-security", type="secondary", use_container_width=True):
+            _close_all_dialogs(keep="_open_security")
+            st.session_state["_open_security"] = True
+            st.rerun()
 screen = st.session_state.screen
+# 헤더 인덱스가 아니면 전처리 창은 강제로 닫는다.
+if screen != "헤더 인덱스":
+    st.session_state["_open_header_prep"] = False
 
 if "vram" not in st.session_state:
     st.session_state.vram = "8"
@@ -841,6 +890,178 @@ if st.session_state.get("_open_server"):
     server_dialog()
 
 
+@st.dialog("보안점검 — 로컬 폐쇄성 검증")
+def security_audit_dialog() -> None:
+    """네트워크 격리·아웃바운드·텔레메트리/소스 감사를 증빙한다."""
+    from security_audit import manual_checklist, run_security_audit
+
+    st.caption(
+        "로컬 LLM(Qwen/Llama)+RAG가 외부로 데이터를 보내지 않는지 "
+        "①격리 테스트 안내 ②netstat 감시 ③소스·텔레메트리 감사로 검증합니다."
+    )
+    tab1, tab2, tab3 = st.tabs(["1. 격리 테스트", "2. 아웃바운드 감시", "3. 코드·텔레메트리"])
+
+    with tab1:
+        st.markdown(
+            """
+**가장 확실한 증빙**
+1. Ollama 모델·BGE-M3 캐시를 미리 받아 둔다.  
+2. Wi-Fi/랜을 끊거나 비행기 모드로 **완전 오프라인** 한다.  
+3. `START.bat` → `http://127.0.0.1:8501` 에서 소스 검토(RAG+LLM)를 실행한다.  
+
+**판정:** 오프라인에서 에러 없이 분석되면 로컬 자원만 사용한 것이다.  
+`ConnectionError` / HuggingFace 접속 실패가 나면 외부 호출 경로를 고쳐야 한다.
+            """.strip()
+        )
+        for item in manual_checklist():
+            if item["id"] == "offline":
+                st.checkbox(item["title"], key=f"sec_chk_{item['id']}", help=item["detail"])
+
+    with tab2:
+        st.markdown(
+            """
+분석 실행 중 관리자 CMD에서:
+
+`netstat -ano | findstr ESTABLISHED`
+
+python.exe / ollama.exe PID의 원격 주소가 **127.0.0.1·사설망만**이면 정상.  
+공인 IP가 ESTABLISHED면 유출 의심.
+
+선택: Windows 방화벽에서 python.exe·ollama.exe **아웃바운드 차단** 후에도 분석되면 외부 경로는 봉쇄된 것.
+            """.strip()
+        )
+        for item in manual_checklist():
+            if item["id"] in {"netstat", "firewall"}:
+                st.checkbox(item["title"], key=f"sec_chk_{item['id']}", help=item["detail"])
+
+    with tab3:
+        st.markdown(
+            """
+자동 점검 항목:
+- `ANONYMIZED_TELEMETRY` / `HF_HUB_OFFLINE` / `TRANSFORMERS_OFFLINE`
+- `.streamlit/config.toml` → `gatherUsageStats = false`, bind `127.0.0.1`
+- 프로젝트 `.py` 외부 URL·상용 AI API 엔드포인트 문자열 스캔
+- Ollama URL이 로컬인지
+- netstat 스냅샷(공인 IP ESTABLISHED)
+            """.strip()
+        )
+        for item in manual_checklist():
+            if item["id"] in {"telemetry", "ollama_bind"}:
+                st.checkbox(item["title"], key=f"sec_chk_{item['id']}", help=item["detail"])
+
+    run_col, close_col = st.columns(2)
+    if run_col.button("자동 점검 실행", type="primary", use_container_width=True):
+        with st.spinner("보안 점검 중"):
+            report = run_security_audit(ollama_url=str(st.session_state.get("ollama_url") or DEFAULT_OLLAMA_URL))
+        st.session_state["security_report"] = report
+        if report.get("auto_ok"):
+            st.success(report.get("summary") or "자동 항목 통과")
+        else:
+            st.warning(report.get("summary") or "주의 항목 있음")
+        st.caption(f"증빙: {report.get('md_path')}")
+
+    report = st.session_state.get("security_report")
+    if report:
+        st.write(
+            f"자동 판정: {'통과' if report.get('auto_ok') else '주의'} · "
+            f"인터넷 지금: {'연결' if report.get('internet_now') else '오프라인'} · "
+            f"소스 findings {len((report.get('source_scan') or {}).get('findings') or [])}건 · "
+            f"netstat 의심 {len((report.get('netstat') or {}).get('suspects') or [])}건"
+        )
+        findings = (report.get("source_scan") or {}).get("findings") or []
+        if findings:
+            st.dataframe(pd.DataFrame(findings), use_container_width=True, hide_index=True)
+        suspects = (report.get("netstat") or {}).get("suspects") or []
+        if suspects:
+            st.error("공인 IP ESTABLISHED 감지")
+            st.dataframe(pd.DataFrame(suspects), use_container_width=True, hide_index=True)
+        env_rows = (report.get("env") or {}).get("rows") or []
+        if env_rows:
+            st.dataframe(pd.DataFrame(env_rows), use_container_width=True, hide_index=True)
+        md_path = Path(report.get("md_path") or "")
+        if md_path.is_file():
+            st.download_button(
+                "증빙 마크다운 받기",
+                md_path.read_bytes(),
+                file_name=md_path.name,
+                mime="text/markdown",
+            )
+
+    if close_col.button("닫기", use_container_width=True):
+        st.session_state["_open_security"] = False
+        st.rerun()
+
+
+if st.session_state.get("_open_security"):
+    security_audit_dialog()
+
+
+@st.dialog("DB(헤더) 전처리")
+def header_preprocess_dialog() -> None:
+    """CPP가 쓰는 struct/typedef만 추려 슬림 헤더를 만든다."""
+    from header_preprocess import MAX_SELECT, OUT_DIR, preprocess_headers
+
+    st.caption(
+        f"이미 전처리된 헤더·CPP를 각각 최대 {MAX_SELECT}개까지 고릅니다. "
+        f"CPP 기준으로 struct/typedef만 남겨 `{OUT_DIR.name}/`에 저장합니다."
+    )
+    if "prep_headers" not in st.session_state:
+        st.session_state.prep_headers = []
+    if "prep_cpps" not in st.session_state:
+        st.session_state.prep_cpps = []
+
+    header_col, cpp_col = st.columns(2)
+    if header_col.button("헤더 선택", use_container_width=True):
+        chosen = _choose_files(
+            "헤더 선택 (최대 5개)",
+            [("Header", "*.h *.hpp *.hh *.hxx"), ("All", "*.*")],
+            max_count=MAX_SELECT,
+        )
+        if chosen:
+            st.session_state.prep_headers = chosen
+            st.rerun()
+    if cpp_col.button("CPP 선택", use_container_width=True):
+        chosen = _choose_files(
+            "CPP 선택 (최대 5개)",
+            [("C/C++", "*.c *.cc *.cpp *.cxx"), ("All", "*.*")],
+            max_count=MAX_SELECT,
+        )
+        if chosen:
+            st.session_state.prep_cpps = chosen
+            st.rerun()
+
+    headers = list(st.session_state.get("prep_headers") or [])
+    cpps = list(st.session_state.get("prep_cpps") or [])
+    st.write("헤더:", ", ".join(Path(p).name for p in headers) or "(없음)")
+    st.write("CPP:", ", ".join(Path(p).name for p in cpps) or "(없음)")
+
+    run_col, close_col = st.columns(2)
+    if run_col.button("추출 실행", type="primary", use_container_width=True, disabled=not (headers and cpps)):
+        try:
+            with st.spinner("슬림 헤더 생성 중"):
+                result = preprocess_headers(
+                    [Path(p) for p in headers],
+                    [Path(p) for p in cpps],
+                )
+            st.session_state["prep_result"] = result
+            st.success(
+                f"심볼 {result['picked_count']}개 / 헤더 전체 {result['header_symbol_total']}개 → "
+                f"{result['out_path']}"
+            )
+            st.write("포함:", ", ".join(result.get("picked_names") or []) or "(없음)")
+        except ValueError as error:
+            st.error(str(error))
+        except OSError as error:
+            st.error(f"저장 실패: {error}")
+    if close_col.button("닫기", use_container_width=True):
+        st.session_state["_open_header_prep"] = False
+        st.rerun()
+
+
+if st.session_state.get("_open_header_prep") and st.session_state.get("screen") == "헤더 인덱스":
+    header_preprocess_dialog()
+
+
 def render_header_index() -> None:
     """설정 파일의 헤더 루트를 보여주고, SQLite 심볼 인덱스를 만들거나 갱신한다."""
     from symbol_index import build_index, index_status, load_config, save_header_roots
@@ -853,6 +1074,14 @@ def render_header_index() -> None:
         st.session_state.context_token_budget = min(4096, max(1500, int(config["context_token_budget"])))
         st.session_state.context_budget_version = 1
     st.caption("헤더 파일은 하나씩 고르지 않습니다. 아래 루트는 config/index.yaml 에 저장되고, 그 안의 헤더만 인덱싱합니다.")
+    prep_col, _ = st.columns([1, 3])
+    if prep_col.button("DB(헤더) 전처리", type="secondary", use_container_width=True):
+        _close_all_dialogs(keep="_open_header_prep")
+        st.session_state["_open_header_prep"] = True
+        st.rerun()
+    prev = st.session_state.get("prep_result")
+    if prev:
+        st.caption(f"최근 전처리: {prev.get('picked_count', 0)}심볼 → {prev.get('out_path', '')}")
     st.text_area("헤더 루트", key="header_roots_text", height=120, help="한 줄에 폴더 하나. 예: D:\\Work\\src")
     save_column, budget_column = st.columns([1, 2], vertical_alignment="bottom")
     budget_column.number_input(
