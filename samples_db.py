@@ -9,8 +9,8 @@ from pathlib import Path
 from chunks import MEMORY_CALL
 
 SAMPLES_PATH = Path(__file__).with_name("bug_samples.json")
-MAX_INJECTED = 3
-MAX_PROMPT_LINES = 25
+MAX_INJECTED = 12
+MAX_PROMPT_LINES = 16
 MACRO_PATTERN = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b")
 _VECTOR_ENABLED = True
 
@@ -123,14 +123,16 @@ def load_samples() -> list[dict]:
     return [_normalize(item, index + 1) for index, item in enumerate(raw)]
 
 
-def save_samples(samples: list[dict]) -> None:
+def save_samples(samples: list[dict], *, sync_vector: bool = True) -> None:
     """같은 내용으로 바꾸다가 파일이 깨지지 않도록 임시 파일에 쓴 뒤 교체한다."""
     normalized = [_normalize(item, index + 1) for index, item in enumerate(samples)]
     payload = json.dumps(normalized, ensure_ascii=False, indent=2) + "\n"
     temporary = SAMPLES_PATH.with_suffix(".json.tmp")
     temporary.write_text(payload, encoding="utf-8")
     temporary.replace(SAMPLES_PATH)
-    # 벡터 인덱스는 가능할 때만 맞춘다. 실패해도 JSON 저장은 유지한다.
+    # 벡터 인덱스는 필요할 때만 맞춘다. 실패해도 JSON 저장은 유지한다.
+    if not sync_vector:
+        return
     try:
         from vector_store import ensure_sample_index, is_available
 
@@ -140,7 +142,7 @@ def save_samples(samples: list[dict]) -> None:
         pass
 
 
-def add_sample(fields: dict) -> tuple[dict, bool]:
+def add_sample(fields: dict, *, sync_vector: bool = True) -> tuple[dict, bool]:
     """새 샘플을 추가한다. 같은 정상 코드가 이미 있으면 새로 만들지 않는다."""
     samples = load_samples()
     sample = _normalize(fields, _next_id(samples))
@@ -155,7 +157,7 @@ def add_sample(fields: dict) -> tuple[dict, bool]:
     if sample["id"] in {item["id"] for item in samples}:
         sample["id"] = _next_id(samples)
     samples.append(sample)
-    save_samples(samples)
+    save_samples(samples, sync_vector=sync_vector)
     return sample, True
 
 
@@ -183,6 +185,188 @@ def import_samples(raw: list, replace: bool) -> int:
         by_id[item["id"]] = item
     save_samples(list(by_id.values()))
     return len(incoming)
+
+
+SAMPLE_MD_TEMPLATE = """## 버그 종류
+조기 리턴 시 미해제
+
+## 키워드
+malloc, return
+
+## 문제 코드
+```c
+BOOL LoadAccount(int err) {
+    char* buffer = (char*)malloc(128);
+    if (err) {
+        return FALSE;
+    }
+    free(buffer);
+    return TRUE;
+}
+```
+
+## 수정 코드
+```c
+if (err) {
+    free(buffer);
+    return FALSE;
+}
+free(buffer);
+return TRUE;
+```
+
+## 해설
+할당 성공 뒤 조기 return 하면 free가 빠진다.
+
+## 오탐 방지
+아니오
+
+---
+
+## 버그 종류
+오탐 예외 예시
+
+## 키워드
+SAFE_FREE
+
+## 문제 코드
+```c
+SAFE_FREE(p);
+```
+
+## 수정 코드
+```c
+SAFE_FREE(p);
+```
+
+## 해설
+SAFE_FREE는 사내 정상 해제 매크로다. 같은 패턴은 누수로 보지 마라.
+
+## 오탐 방지
+예
+"""
+
+_SECTION_ALIASES = {
+    "버그 종류": "category",
+    "category": "category",
+    "종류": "category",
+    "키워드": "keywords",
+    "keywords": "keywords",
+    "문제 코드": "bad_code",
+    "bad_code": "bad_code",
+    "문제코드": "bad_code",
+    "수정 코드": "good_code",
+    "good_code": "good_code",
+    "수정코드": "good_code",
+    "해설": "explanation",
+    "explanation": "explanation",
+    "설명": "explanation",
+    "오탐 방지": "is_false_positive",
+    "오탐방지": "is_false_positive",
+    "false_positive": "is_false_positive",
+    "is_false_positive": "is_false_positive",
+}
+_HEADING = re.compile(r"^#{1,3}\s+(.+?)\s*$")
+_FENCE = re.compile(r"^```(?:\w+)?\s*$")
+
+
+def _truthy(text: str) -> bool:
+    value = text.strip().lower()
+    return value in {"예", "y", "yes", "true", "1", "온", "on", "오탐", "정상"}
+
+
+def _strip_code_fence(body: str) -> str:
+    lines = body.strip().splitlines()
+    if len(lines) >= 2 and _FENCE.match(lines[0]) and _FENCE.match(lines[-1]):
+        return "\n".join(lines[1:-1]).strip()
+    return body.strip()
+
+
+def parse_sample_markdown(text: str) -> list[dict]:
+    """MD에서 샘플 목록을 읽는다. `---` 구분선으로 여러 건을 나눈다."""
+    raw = (text or "").replace("\r\n", "\n").strip()
+    if not raw:
+        raise ValueError("MD 내용이 비어 있습니다.")
+    chunks = re.split(r"\n\s*---\s*\n", raw)
+    samples: list[dict] = []
+    for chunk in chunks:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        fields: dict[str, str] = {}
+        current_key = ""
+        buffer: list[str] = []
+
+        def flush() -> None:
+            nonlocal current_key, buffer
+            if not current_key:
+                buffer = []
+                return
+            fields[current_key] = "\n".join(buffer).strip()
+            current_key = ""
+            buffer = []
+
+        for line in chunk.splitlines():
+            heading = _HEADING.match(line)
+            if heading:
+                title = heading.group(1).strip()
+                mapped = _SECTION_ALIASES.get(title) or _SECTION_ALIASES.get(title.lower())
+                if mapped:
+                    flush()
+                    current_key = mapped
+                    continue
+            buffer.append(line)
+        flush()
+        if not fields:
+            continue
+        sample = {
+            "category": fields.get("category") or "미분류",
+            "keywords": fields.get("keywords") or "",
+            "bad_code": _strip_code_fence(fields.get("bad_code") or ""),
+            "good_code": _strip_code_fence(fields.get("good_code") or ""),
+            "explanation": fields.get("explanation") or "",
+            "is_false_positive": _truthy(fields.get("is_false_positive") or ""),
+        }
+        if not sample["bad_code"]:
+            raise ValueError(f"MD 샘플 '{sample['category']}'에 문제 코드가 없습니다.")
+        if not str(sample["keywords"]).strip():
+            raise ValueError(f"MD 샘플 '{sample['category']}'에 키워드가 없습니다.")
+        samples.append(sample)
+    if not samples:
+        raise ValueError(
+            "MD에서 샘플을 찾지 못했습니다. "
+            "## 버그 종류 / ## 키워드 / ## 문제 코드 / ## 수정 코드 / ## 해설 형식을 쓰세요."
+        )
+    return samples
+
+
+def import_samples_from_markdown(text: str, replace: bool = False) -> int:
+    """MD 텍스트를 파싱해 샘플을 추가하거나 교체한다. 벡터 동기화는 마지막에 한 번만 한다."""
+    incoming = parse_sample_markdown(text)
+    if replace:
+        save_samples(incoming, sync_vector=True)
+        return len(incoming)
+    samples = load_samples()
+    added = 0
+    for fields in incoming:
+        sample = _normalize(fields, _next_id(samples))
+        if not sample["bad_code"]:
+            raise ValueError(f"MD 샘플 '{sample['category']}'에 문제 코드가 없습니다.")
+        if not sample["keywords"]:
+            raise ValueError(f"MD 샘플 '{sample['category']}'에 키워드가 없습니다.")
+        if sample["is_false_positive"]:
+            exists = any(
+                current["is_false_positive"] and current["bad_code"] == sample["bad_code"]
+                for current in samples
+            )
+            if exists:
+                continue
+        if sample["id"] in {item["id"] for item in samples}:
+            sample["id"] = _next_id(samples)
+        samples.append(sample)
+        added += 1
+    save_samples(samples, sync_vector=True)
+    return added
 
 
 def register_false_positive(code: str, function_name: str, summary: str) -> tuple[dict, bool]:
@@ -287,32 +471,93 @@ def select_samples(
         picked["_keyword_score"] = round(float(keyword_score), 4)
         combined.append((score, -sample_id, picked))
     combined.sort(reverse=True)
-    return [item[2] for item in combined[:limit]]
+    # 같은 점수면 버그 종류를 고르게 넣어, 한 함수의 여러 버그가 앞번호 3개에 가려지지 않게 한다.
+    return _diversify_by_category([item[2] for item in combined], limit)
+
+
+def _diversify_by_category(ranked: list[dict], limit: int) -> list[dict]:
+    """점수 순을 유지하되, 먼저 종류별로 하나씩 채운 뒤 나머지를 채운다."""
+    if limit <= 0 or not ranked:
+        return []
+    selected: list[dict] = []
+    used_ids: set[int] = set()
+    used_categories: set[str] = set()
+    for sample in ranked:
+        category = str(sample.get("category") or "")
+        sample_id = int(sample.get("id") or 0)
+        if sample_id in used_ids or category in used_categories:
+            continue
+        selected.append(sample)
+        used_ids.add(sample_id)
+        used_categories.add(category)
+        if len(selected) >= limit:
+            return selected
+    for sample in ranked:
+        sample_id = int(sample.get("id") or 0)
+        if sample_id in used_ids:
+            continue
+        selected.append(sample)
+        used_ids.add(sample_id)
+        if len(selected) >= limit:
+            break
+    return selected
 
 
 def format_samples(samples: list[dict]) -> str:
     """시스템 프롬프트의 참고 사례 섹션. 긴 코드는 앞부분만 남긴다."""
     if not samples:
         return ""
-    blocks = ["[참고할 사내 버그 및 예외 사례]"]
+    # 많이 넣을수록 코드 길이를 줄여 컨텍스트를 지킨다.
+    code_lines = 12 if len(samples) <= 4 else 8 if len(samples) <= 8 else 5
+    bug_n = sum(1 for sample in samples if not sample.get("is_false_positive"))
+    blocks = [
+        "[참고할 사내 버그 및 예외 사례]",
+        f"버그 사례는 {bug_n}개다. 창에 같은 패턴이 있으면 findings에 모두 넣고, "
+        "앞부분만 쓰고 중간에 멈추지 마라. 줄마다 따로 보고하고 한두 건만 고르지 마라.",
+    ]
     for index, sample in enumerate(samples, start=1):
         if sample["is_false_positive"]:
             kind = "오탐 방지. 이 패턴은 사내 정상 코드이니 버그로 보고하지 마라."
         else:
-            kind = "버그 사례. 같은 유형이면 찾아 보고하라."
+            kind = "버그 사례. 같은 유형이면 반드시 찾아 보고하라."
+        bug_hint = _bug_type_hint(sample)
+        header = f"{index}. {sample['category']} ({kind})"
+        if bug_hint:
+            header += f" bug_type={bug_hint}"
         blocks.append(
             "\n".join(
                 [
-                    f"{index}. {sample['category']} ({kind})",
+                    header,
                     "문제 코드:",
-                    _clip(sample["bad_code"]),
+                    _clip(sample["bad_code"], max_lines=code_lines),
                     "올바른 코드:",
-                    _clip(sample["good_code"]),
-                    f"해설: {_clip(sample['explanation'], max_lines=4)}",
+                    _clip(sample["good_code"], max_lines=code_lines),
+                    f"해설: {_clip(sample['explanation'], max_lines=3)}",
                 ]
             )
         )
     return "\n\n".join(blocks)
+
+
+def _bug_type_hint(sample: dict) -> str:
+    """프롬프트용 enum 힌트. 샘플에 bug_type이 없으면 카테고리·키워드로 추정한다."""
+    explicit = str(sample.get("bug_type") or "").strip()
+    if explicit:
+        return explicit
+    text = f"{sample.get('category') or ''} {' '.join(sample.get('keywords') or [])}".lower()
+    if "double" in text or "이중" in text:
+        return "double_free"
+    if "leak" in text or "누수" in text:
+        return "memory_leak"
+    if "sizeof" in text:
+        return "pointer_sizeof_misuse"
+    if any(word in text for word in ("overflow", "오버플", "sprintf", "memcpy", "strcat", "버퍼")):
+        return "buffer_overflow"
+    if any(word in text for word in ("uninit", "미초기", "초기화", "wild")):
+        return "uninitialized_read"
+    if "dangling" in text or "댕글" in text:
+        return "dangling_pointer"
+    return ""
 
 
 def _normalize(raw: dict, fallback_id: int) -> dict:
@@ -330,6 +575,7 @@ def _normalize(raw: dict, fallback_id: int) -> dict:
         sample_id = int(raw.get("id") or fallback_id)
     except (TypeError, ValueError):
         sample_id = fallback_id
+    bug_type = str(raw.get("bug_type") or "").strip()
     return {
         "id": sample_id,
         "category": str(raw.get("category") or "").strip() or "미분류",
@@ -338,6 +584,7 @@ def _normalize(raw: dict, fallback_id: int) -> dict:
         "good_code": str(raw.get("good_code") or "").strip(),
         "explanation": str(raw.get("explanation") or "").strip(),
         "is_false_positive": bool(raw.get("is_false_positive")),
+        "bug_type": bug_type,
     }
 
 

@@ -149,7 +149,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ram", default="16", choices=["16", "32"], help="PC 메인 메모리")
     parser.add_argument("--std", default="c++03", choices=["c++03", "c++17"])
     parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--num-predict", type=int, default=1024, choices=PREDICT_CHOICES)
+    parser.add_argument("--num-predict", type=int, default=2048, choices=PREDICT_CHOICES)
     parser.add_argument("--note", default="이 소스의 메모리 버그와 초기화 버그를 찾아 주세요.")
     return parser
 

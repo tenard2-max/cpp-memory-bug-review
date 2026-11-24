@@ -6,6 +6,8 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 
 # 다른 라이브러리 import 전에 텔레메트리·HF 오프라인 차단을 건다.
 from security_audit import apply_local_security_env, ensure_streamlit_config
@@ -42,10 +44,12 @@ from reviewer import (
     review_paths,
 )
 from samples_db import (
+    SAMPLE_MD_TEMPLATE,
     SAMPLES_PATH,
     add_sample,
     delete_sample,
     import_samples,
+    import_samples_from_markdown,
     load_samples,
     register_false_positive,
     set_vector_search_enabled,
@@ -156,6 +160,16 @@ def _close_all_dialogs(*, keep: str | None = None) -> None:
         if keep and key == keep:
             continue
         st.session_state[key] = False
+
+
+def _format_stopwatch(seconds: float) -> str:
+    """초를 스톱워치 표기(MM:SS 또는 H:MM:SS)로 바꾼다."""
+    total = max(0, int(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
 
 st.set_page_config(page_title="C++ 메모리·초기화 버그 검토", layout="wide")
 st.markdown(
@@ -517,7 +531,7 @@ with st.container(key="app_header", border=False):
             st.session_state["dlg_cross_enabled"] = bool(st.session_state.get("cross_enabled"))
             st.session_state["dlg_deepseek_model"] = st.session_state.get("deepseek_model", DEFAULT_MODEL)
             st.session_state["dlg_llama_model"] = st.session_state.get("llama_model", DEFAULT_MODEL)
-            st.session_state["dlg_num_predict"] = st.session_state.get("num_predict", 1024)
+            st.session_state["dlg_num_predict"] = st.session_state.get("num_predict", 2048)
             st.session_state["dlg_cpp_standard"] = st.session_state.get("cpp_standard", "c++03")
             st.session_state["dlg_vector_search"] = bool(st.session_state.get("vector_search", True))
             _close_all_dialogs(keep="_open_options")
@@ -557,12 +571,12 @@ if "deepseek_model" not in st.session_state:
 if "llama_model" not in st.session_state:
     st.session_state.llama_model = DEFAULT_MODEL
 if "num_predict" not in st.session_state:
-    st.session_state.num_predict = 1024
+    st.session_state.num_predict = 2048
 if "cpp_standard" not in st.session_state:
     st.session_state.cpp_standard = "c++03"
-if st.session_state.get("predict_default_version") != 2:
-    st.session_state.num_predict = 1024
-    st.session_state.predict_default_version = 2
+if st.session_state.get("predict_default_version") != 3:
+    st.session_state.num_predict = 2048
+    st.session_state.predict_default_version = 3
 if st.session_state.get("model_defaults_version") != 4:
     st.session_state.model_name = DEFAULT_MODEL
     st.session_state.deepseek_model = DEFAULT_MODEL
@@ -631,7 +645,7 @@ def _commit_options_from_dialog() -> None:
         st.session_state.get("dlg_llama_model") or st.session_state.get("llama_model") or DEFAULT_MODEL
     )
     st.session_state.num_predict = int(
-        st.session_state.get("dlg_num_predict") or st.session_state.get("num_predict") or 1024
+        st.session_state.get("dlg_num_predict") or st.session_state.get("num_predict") or 2048
     )
     st.session_state.cpp_standard = str(
         st.session_state.get("dlg_cpp_standard") or st.session_state.get("cpp_standard") or "c++03"
@@ -680,7 +694,7 @@ def options_dialog() -> None:
     st.session_state.setdefault("dlg_cross_enabled", bool(st.session_state.get("cross_enabled")))
     st.session_state.setdefault("dlg_deepseek_model", st.session_state.get("deepseek_model", DEFAULT_MODEL))
     st.session_state.setdefault("dlg_llama_model", st.session_state.get("llama_model", DEFAULT_MODEL))
-    st.session_state.setdefault("dlg_num_predict", st.session_state.get("num_predict", 1024))
+    st.session_state.setdefault("dlg_num_predict", st.session_state.get("num_predict", 2048))
     st.session_state.setdefault("dlg_cpp_standard", st.session_state.get("cpp_standard", "c++03"))
     st.session_state.setdefault("dlg_vector_search", bool(st.session_state.get("vector_search", True)))
 
@@ -746,7 +760,7 @@ def options_dialog() -> None:
         "토큰 상한",
         PREDICT_CHOICES,
         key="dlg_num_predict",
-        help="모델이 한 번 호출에서 생성하는 최대 토큰입니다. 기본은 1024입니다.",
+        help="모델이 한 번 호출에서 생성하는 최대 토큰입니다. 기본은 2048입니다.",
     )
     st.selectbox(
         "cppcheck 언어 표준",
@@ -1161,60 +1175,97 @@ def render_header_index() -> None:
 
 
 def render_sample_admin() -> None:
-    """화면에서 버그 샘플과 오탐 예외를 추가하고, 지우고, JSON으로 주고받는다."""
+    """MD 파일로 버그 샘플을 등록하고, 목록을 관리한다."""
     st.subheader("샘플 학습 관리")
-    st.caption("저장한 샘플은 다음 검토부터 바로 쓰입니다. 지금 보는 함수와 키워드가 맞는 샘플만 최대 3개 프롬프트에 넣습니다.")
+    st.caption(
+        "수기 입력 대신 MD 파일로 등록합니다. "
+        "다음 검토부터 키워드·벡터로 맞는 샘플을 종류별로 고르게, 최대 12개까지 프롬프트에 넣습니다."
+    )
+    notice = st.session_state.pop("sample_notice", None)
+    if notice:
+        st.success(notice)
     try:
         samples = load_samples()
     except ValueError as error:
         st.error(str(error))
         return
 
-    with st.form("new_sample", clear_on_submit=True):
-        category = st.text_input("버그 종류", placeholder="조기 리턴 시 미해제")
-        keywords = st.text_input("키워드", placeholder="malloc, return")
-        bad_code = st.text_area("문제 코드", height=140)
-        good_code = st.text_area("수정 코드", height=100)
-        explanation = st.text_area("해설", height=80)
-        false_positive = st.checkbox("오탐 방지 (이 패턴은 정상 코드)")
-        submitted = st.form_submit_button("샘플 저장", type="primary")
-    if submitted:
+    st.markdown("**MD로 샘플 등록**")
+    st.caption(
+        "필수 절: `## 버그 종류` · `## 키워드` · `## 문제 코드` · `## 수정 코드` · `## 해설` · "
+        "`## 오탐 방지`(예/아니오). 여러 건은 `---` 로 구분합니다."
+    )
+    samples_dir = Path("samples")
+    local_mds = sorted(samples_dir.glob("*.md")) if samples_dir.is_dir() else []
+    if local_mds:
+        pick = st.selectbox(
+            "프로젝트 samples/ 폴더에서 선택",
+            options=[""] + [path.name for path in local_mds],
+            format_func=lambda name: "(선택)" if not name else name,
+            key="sample_md_local_pick",
+        )
+    else:
+        pick = ""
+    tmpl_col, _ = st.columns([1, 2])
+    tmpl_col.download_button(
+        "MD 템플릿 받기",
+        SAMPLE_MD_TEMPLATE.encode("utf-8"),
+        file_name="bug_sample_template.md",
+        mime="text/markdown",
+    )
+    md_files = st.file_uploader(
+        "MD 파일 선택 (여러 개 가능)",
+        type=["md", "markdown"],
+        accept_multiple_files=True,
+        key="sample_md_import",
+    )
+    replace_md = st.checkbox("등록 시 기존 샘플을 모두 교체", key="sample_md_replace")
+    can_register = bool(md_files) or bool(pick)
+    if st.button("MD 등록", type="primary", disabled=not can_register):
+        total = 0
         try:
-            add_sample(
-                {
-                    "category": category,
-                    "keywords": keywords,
-                    "bad_code": bad_code,
-                    "good_code": good_code,
-                    "explanation": explanation,
-                    "is_false_positive": false_positive,
-                }
-            )
-        except ValueError as error:
-            st.error(str(error))
+            with st.spinner("MD 등록 중… (벡터 인덱스는 마지막에 한 번만 맞춥니다)"):
+                texts: list[str] = []
+                if pick:
+                    texts.append((samples_dir / pick).read_text(encoding="utf-8-sig"))
+                for item in md_files or []:
+                    texts.append(item.getvalue().decode("utf-8-sig"))
+                if replace_md:
+                    first, *rest = texts
+                    total += import_samples_from_markdown(first, replace=True)
+                    for text in rest:
+                        total += import_samples_from_markdown(text, replace=False)
+                else:
+                    for text in texts:
+                        total += import_samples_from_markdown(text, replace=False)
+        except (UnicodeDecodeError, ValueError, OSError) as error:
+            st.error(f"MD 등록 실패: {error}")
+        except Exception as error:
+            st.error(f"MD 등록 중 오류: {error}")
         else:
-            st.session_state["sample_notice"] = "샘플을 저장했습니다. 다음 검토부터 반영됩니다."
+            st.session_state["sample_notice"] = f"MD에서 샘플 {total}건을 등록했습니다."
             st.rerun()
 
-    export_col, import_col = st.columns(2)
-    if SAMPLES_PATH.exists():
-        export_col.download_button(
-            "JSON 내보내기",
-            SAMPLES_PATH.read_bytes(),
-            file_name="bug_samples.json",
-            mime="application/json",
-        )
-    uploaded = import_col.file_uploader("JSON 불러오기", type=["json"], key="sample_import")
-    replace = st.checkbox("불러올 때 기존 샘플을 모두 교체")
-    if st.button("불러오기", disabled=uploaded is None):
-        try:
-            payload = json.loads(uploaded.getvalue().decode("utf-8-sig"))
-            count = import_samples(payload, replace)
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
-            st.error(f"불러오지 못했습니다: {error}")
-        else:
-            st.session_state["sample_notice"] = f"샘플 {count}건을 불러왔습니다."
-            st.rerun()
+    with st.expander("JSON 백업(선택)"):
+        export_col, import_col = st.columns(2)
+        if SAMPLES_PATH.exists():
+            export_col.download_button(
+                "JSON 내보내기",
+                SAMPLES_PATH.read_bytes(),
+                file_name="bug_samples.json",
+                mime="application/json",
+            )
+        uploaded = import_col.file_uploader("JSON 불러오기", type=["json"], key="sample_import")
+        replace = st.checkbox("JSON 불러올 때 기존 샘플을 모두 교체", key="sample_json_replace")
+        if st.button("JSON 불러오기", disabled=uploaded is None):
+            try:
+                payload = json.loads(uploaded.getvalue().decode("utf-8-sig"))
+                count = import_samples(payload, replace)
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+                st.error(f"불러오지 못했습니다: {error}")
+            else:
+                st.session_state["sample_notice"] = f"샘플 {count}건을 불러왔습니다."
+                st.rerun()
 
     st.write(f"등록된 샘플 {len(samples)}건")
     if not samples:
@@ -1574,7 +1625,21 @@ with st.container(border=True, key="work_canvas"):
                             st.rerun()
 
 
-    if st.button("메모리·초기화 버그 검토", type="primary", disabled=not online or model_missing):
+    review_col, time_col = st.columns([2, 3], vertical_alignment="center")
+    start_review = review_col.button(
+        "메모리·초기화 버그 검토",
+        type="primary",
+        disabled=not online or model_missing,
+        use_container_width=True,
+    )
+    time_slot = time_col.empty()
+    last_timing = st.session_state.get("last_review_timing") or {}
+    if last_timing.get("elapsed") is not None:
+        time_slot.markdown(f"**⏱ {_format_stopwatch(float(last_timing['elapsed']))}**")
+    else:
+        time_slot.markdown("**⏱ 00:00**")
+
+    if start_review:
         targets: list[Path] = []
         temp_dir = None
         project_text = st.session_state.project_root.strip()
@@ -1591,16 +1656,38 @@ with st.container(border=True, key="work_canvas"):
         if not targets:
             st.warning("파일 또는 프로젝트 폴더를 지정하세요.")
         else:
-            progress = st.progress(0, text="진행 0% · cppcheck로 함수를 나누는 중")
-            shown = {"percent": 0.0}
+            progress = st.progress(0, text="진행 0% · ⏱ 00:00 · cppcheck로 함수를 나누는 중")
+            shown = {"percent": 0.0, "label": "cppcheck로 함수를 나누는 중"}
+            started_at = time.monotonic()
+            stop_clock = threading.Event()
+            time_slot.markdown("**⏱ 00:00**")
+
+            def _paint_clock(force_label: str | None = None) -> str:
+                elapsed = time.monotonic() - started_at
+                clock = _format_stopwatch(elapsed)
+                label = force_label if force_label is not None else shown["label"]
+                time_slot.markdown(f"**⏱ {clock}**")
+                progress.progress(
+                    shown["percent"] / 100.0,
+                    text=f"진행 {shown['percent']:.0f}% · ⏱ {clock} · {cpu_label()} · {label}",
+                )
+                return clock
 
             def on_progress(percent: float, label: str) -> None:
                 shown["percent"] = max(0.0, min(float(percent), 100.0))
-                progress.progress(
-                    shown["percent"] / 100.0,
-                    text=f"진행 {shown['percent']:.0f}% · {cpu_label()} · {label}",
-                )
+                shown["label"] = label
+                _paint_clock(label)
 
+            def _clock_heartbeat() -> None:
+                """진행 콜백이 없어도 1초마다 스톱워치를 갱신한다."""
+                while not stop_clock.wait(1.0):
+                    try:
+                        _paint_clock()
+                    except Exception:
+                        break
+
+            clock_thread = threading.Thread(target=_clock_heartbeat, daemon=True)
+            clock_thread.start()
             try:
                 result = review_paths(
                     targets,
@@ -1618,18 +1705,37 @@ with st.container(border=True, key="work_canvas"):
                     llama_model=st.session_state.llama_model.strip(),
                     think_mode=review_think_mode,
                 )
+                elapsed = time.monotonic() - started_at
+                clock = _format_stopwatch(elapsed)
+                st.session_state["last_review_timing"] = {"elapsed": elapsed}
+                time_slot.markdown(f"**⏱ {clock}**")
                 markdown_path, csv_path = save_reports(result["findings"], BUG_LABELS)
                 result["markdown_path"] = str(markdown_path)
                 result["csv_path"] = str(csv_path)
+                result["elapsed_seconds"] = elapsed
                 st.session_state["last_review"] = result
                 st.session_state["show_done_dialog"] = True
             except ReviewError as error:
-                progress.progress(shown["percent"] / 100.0, text=f"진행 {shown['percent']:.0f}%에서 중단")
+                elapsed = time.monotonic() - started_at
+                clock = _format_stopwatch(elapsed)
+                progress.progress(
+                    shown["percent"] / 100.0,
+                    text=f"진행 {shown['percent']:.0f}% · ⏱ {clock}에서 중단",
+                )
+                time_slot.markdown(f"**⏱ {clock}**")
                 st.error(str(error))
             except OSError as error:
-                progress.progress(shown["percent"] / 100.0, text=f"진행 {shown['percent']:.0f}%에서 중단")
+                elapsed = time.monotonic() - started_at
+                clock = _format_stopwatch(elapsed)
+                progress.progress(
+                    shown["percent"] / 100.0,
+                    text=f"진행 {shown['percent']:.0f}% · ⏱ {clock}에서 중단",
+                )
+                time_slot.markdown(f"**⏱ {clock}**")
                 st.error(f"소스를 읽지 못했습니다: {error}")
             finally:
+                stop_clock.set()
+                clock_thread.join(timeout=2.0)
                 if temp_dir is not None:
                     temp_dir.cleanup()
 

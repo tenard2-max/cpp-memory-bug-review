@@ -236,6 +236,9 @@ def build_chunks(
                 continue
             anchors.setdefault(issue["line"] - 1, []).append(f"cppcheck {issue['id']}: {issue['message']}")
         for index, line in enumerate(code_lines):
+            # #include <new> 의 new 를 할당으로 오인하면 함수 밖 앵커→전체파일 중복 청크가 생긴다.
+            if line.lstrip().startswith("#"):
+                continue
             if MEMORY_CALL.search(line) or _has_pointer(line) or STRUCT_WORD.search(line):
                 anchors.setdefault(index, []).append("메모리·포인터 또는 구조체")
             if struct_pattern is not None:
