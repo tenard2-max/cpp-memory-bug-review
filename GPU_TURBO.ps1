@@ -1,9 +1,9 @@
 # Keep GTX 1080 Ti out of Idle P-state while Ollama/CUDA runs under WDDM.
-# Must run in STA. START.bat / GPU_WAKE.bat pass -STA.
+# Must run in STA. START.bat / GPU_TURBO.bat pass -STA.
 param()
 
 $ErrorActionPreference = "Continue"
-$logPath = Join-Path $PSScriptRoot "logs\gpu_wake.log"
+$logPath = Join-Path $PSScriptRoot "logs\gpu_turbo.log"
 try {
     New-Item -ItemType Directory -Force -Path (Split-Path $logPath) | Out-Null
     Add-Content -Path $logPath -Value ("[{0}] start pid={1} apartment={2}" -f (Get-Date -Format o), $PID, [Threading.Thread]::CurrentThread.GetApartmentState())
@@ -22,7 +22,7 @@ try {
     Add-Type -AssemblyName PresentationCore, PresentationFramework, WindowsBase
 
     $window = New-Object System.Windows.Window
-    $window.Title = "GPU Wake - leave open during LLM"
+    $window.Title = "GPU Turbo - leave open during LLM"
     $window.Width = 460
     $window.Height = 200
     $window.Topmost = $true
@@ -40,7 +40,7 @@ try {
     $text.TextWrapping = "Wrap"
     $text.TextAlignment = "Center"
     $text.Margin = New-Object System.Windows.Thickness(12)
-    $text.Text = "GPU wake starting...`r`nLeave this window open while review runs."
+    $text.Text = "GPU Turbo starting...`r`nLeave this window open while review runs."
     $window.Content = $text
 
     $script:tick = 0
@@ -50,8 +50,8 @@ try {
         param($sender, $e)
         if ($script:allowClose) { return }
         $answer = [System.Windows.MessageBox]::Show(
-            "Close GPU Wake? Clocks may drop back to ~700MHz during LLM.",
-            "GPU Wake",
+            "Close GPU Turbo? Clocks may drop back to ~700MHz during LLM.",
+            "GPU Turbo",
             [System.Windows.MessageBoxButton]::YesNo,
             [System.Windows.MessageBoxImage]::Warning
         )
@@ -68,7 +68,7 @@ try {
         try {
             $script:tick++
             $hue = [byte]($script:tick % 255)
-            $text.Text = ("GPU wake #{0}`r`nLeave open while Streamlit/Ollama review runs`r`nClose only when finished" -f $script:tick)
+            $text.Text = ("GPU Turbo #{0}`r`nLeave open while Streamlit/Ollama review runs`r`nClose only when finished" -f $script:tick)
             $brush = New-Object System.Windows.Media.SolidColorBrush
             $brush.Color = [System.Windows.Media.Color]::FromRgb($hue, 220, [byte](255 - $hue))
             $text.Foreground = $brush
@@ -87,7 +87,7 @@ try {
     try { Add-Content -Path $logPath -Value ("[{0}] FATAL {1}" -f (Get-Date -Format o), $msg) } catch {}
     try {
         Add-Type -AssemblyName System.Windows.Forms
-        [System.Windows.Forms.MessageBox]::Show("GPU Wake failed:`r`n$msg", "GPU Wake") | Out-Null
+        [System.Windows.Forms.MessageBox]::Show("GPU Turbo failed:`r`n$msg", "GPU Turbo") | Out-Null
     } catch {}
     exit 1
 }

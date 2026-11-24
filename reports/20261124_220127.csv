@@ -1,0 +1,85 @@
+﻿파일명,줄 번호,함수명,버그 종류,확신도,현재 코드,수정 제안,근거
+use_after_free.cpp,280,trigger_all_20_errors,미초기화 읽기,High,"277:     // ==========================================
+278: 
+279:     // 1. 미초기화 지역 변수 사용 (쓰레기 값 읽기)
+280:     int uninit_local;
+281:     volatile int val1 = uninit_local + 1;
+282: 
+283:     // 2. 와일드 포인터(미초기화 포인터) 역참조",int uninit_local = 0;,미초기화 지역 변수 사용
+use_after_free.cpp,284,trigger_all_20_errors,미초기화 읽기,High,"281:     volatile int val1 = uninit_local + 1;
+282: 
+283:     // 2. 와일드 포인터(미초기화 포인터) 역참조
+284:     int* wild_ptr;
+285:     volatile int val2 = *wild_ptr;
+286: 
+287: 		// 3~5. 메모리",int* wild_ptr = nullptr;,와일드 포인터(미초기화 포인터) 역참조
+use_after_free.cpp,289,trigger_all_20_errors,버퍼 넘침,High,"286: 
+287: 		// 3~5. 메모리
+288:     char ssTemp[10];
+289:     sprintf(ssTemp, ""dfsljsdlkfjsldkfdlfksldkfsjlfd"");
+290: 		
+291: 		memcpy( ssTemp, ""dlfkjsdklfjdslfksdjl"", 11);
+292: 		","sprintf(ssTemp, ""dfsljsdlkfjsldkfdlfksldkfsjlfd"", 10);",스택 버퍼 오버플로우
+use_after_free.cpp,291,trigger_all_20_errors,버퍼 넘침,High,"288:     char ssTemp[10];
+289:     sprintf(ssTemp, ""dfsljsdlkfjsldkfdlfksldkfsjlfd"");
+290: 		
+291: 		memcpy( ssTemp, ""dlfkjsdklfjdslfksdjl"", 11);
+292: 		
+293: 		sprintf(ssTemp, ""123456789"");
+294: 		strcat(ssTemp, ""1234"");","memcpy(ssTemp, ""dlfkjsdklfjdslfksdjl"", 9);",스택 버퍼 오버플로우
+use_after_free.cpp,294,trigger_all_20_errors,버퍼 넘침,High,"291: 		memcpy( ssTemp, ""dlfkjsdklfjdslfksdjl"", 11);
+292: 		
+293: 		sprintf(ssTemp, ""123456789"");
+294: 		strcat(ssTemp, ""1234"");
+295: 		
+296:     
+297: ","strncat(ssTemp, ""1234"", 4);",스택 버퍼 오버플로우
+use_after_free.cpp,301,trigger_all_20_errors,미초기화 읽기,High,"298:     // 6. 동적 할당 후 부분 초기화된 배열의 미정의 요소 읽기
+299:     int* dyn_arr = new int[10];
+300:     dyn_arr[0] = 1;
+301:     volatile int val5 = dyn_arr[5]; 
+302:     delete[] dyn_arr;
+303: 
+304:     ",for (int i = 1; i < 10; i++) dyn_arr[i] = 0;,동적 할당 후 부분 초기화된 배열의 미정의 요소 읽기
+use_after_free.cpp,311,trigger_all_20_errors,미초기화 읽기,High,"308:     if (flag) {
+309:         cond_var = 100;
+310:     }
+311:     volatile int val7 = cond_var;
+312: 
+313:     
+314: ",int cond_var = 0;,조건부 초기화 누락 변수 사용
+use_after_free.cpp,317,trigger_all_20_errors,미초기화 읽기,High,"314: 
+315:     // 8. 미초기화 불리언 플래그 제어 흐름 사용
+316:     bool uninit_flag;
+317:     volatile int val9 = uninit_flag ? 1 : 0;
+318: 
+319:    
+320: ",bool uninit_flag = false;,미초기화 불리언 플래그 제어 흐름 사용
+use_after_free.cpp,326,trigger_all_20_errors,누수,High,"323:     // ==========================================
+324: 
+325:     // 9. 메모리 누수 (Memory Leak)
+326:     int* leak_ptr = new int(500);
+327:     // delete leak_ptr; 누락됨
+328: 
+329:     // 10. 이중 해제 (Double Free)",delete leak_ptr;,메모리 누수
+use_after_free.cpp,332,trigger_all_20_errors,중복 해제,High,"329:     // 10. 이중 해제 (Double Free)
+330:     int* double_ptr = new int(100);
+331:     delete double_ptr;
+332:     delete double_ptr; // 두 번째 해제
+333: 
+334:    
+335:     ",delete double_ptr; double_ptr = nullptr;,이중 해제
+use_after_free.cpp,338,trigger_all_20_errors,버퍼 넘침,High,"335:     
+336:     // 11. 힙 버퍼 오버플로우 (Heap Buffer Overflow)
+337:     int* heap_buf = new int[5];
+338:     heap_buf[5] = 999; // 할당된 크기(5)를 넘어선 영역에 쓰기
+339:     delete[] heap_buf;
+340: 
+341:     // 12. 스택 버퍼 오버플로우 (Stack Buffer Overflow)",heap_buf[4] = 999;,힙 버퍼 오버플로우
+use_after_free.cpp,343,trigger_all_20_errors,버퍼 넘침,High,"340: 
+341:     // 12. 스택 버퍼 오버플로우 (Stack Buffer Overflow)
+342:     int stack_buf[3];
+343:     stack_buf[5] = 777; // 스택 경계 초과 쓰기
+344: 
+345:     
+346:    ",stack_buf[2] = 777;,스택 버퍼 오버플로우

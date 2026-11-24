@@ -6,7 +6,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 
-public class GpuWakeD3D : Form
+public class GpuTurboD3D : Form
 {
     [DllImport("d3d9.dll")] static extern IntPtr Direct3DCreate9(uint SDKVersion);
     [StructLayout(LayoutKind.Sequential)] struct D3DPRESENT_PARAMETERS {
@@ -40,9 +40,9 @@ public class GpuWakeD3D : Form
     int _frame;
     Label _label;
 
-    public GpuWakeD3D()
+    public GpuTurboD3D()
     {
-        Text = "GPU Wake D3D - leave open during LLM";
+        Text = "GPU Turbo D3D - leave open during LLM";
         Width = 480; Height = 200;
         TopMost = true;
         FormBorderStyle = FormBorderStyle.FixedToolWindow;
@@ -57,7 +57,7 @@ public class GpuWakeD3D : Form
         Controls.Add(_label);
         Load += OnLoad;
         FormClosing += (_, e) => {
-            if (MessageBox.Show(this, "Close GPU wake?", "GPU Wake", MessageBoxButtons.YesNo) != DialogResult.Yes)
+            if (MessageBox.Show(this, "Close GPU Turbo?", "GPU Turbo", MessageBoxButtons.YesNo) != DialogResult.Yes)
                 e.Cancel = true;
         };
     }
@@ -96,16 +96,16 @@ public class GpuWakeD3D : Form
         _dev.EndScene();
         _dev.Present(IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
         if ((_frame % 30) == 0)
-            _label.Text = "D3D wake #" + _frame + "\nLeave open while review runs";
+            _label.Text = "D3D turbo #" + _frame + "\nLeave open while review runs";
     }
 
     [STAThread]
     public static void Main()
     {
         Application.EnableVisualStyles();
-        Application.Run(new GpuWakeD3D());
+        Application.Run(new GpuTurboD3D());
     }
 }
 "@ -ReferencedAssemblies System.Windows.Forms, System.Drawing
 
-[GpuWakeD3D]::Main()
+[GpuTurboD3D]::Main()

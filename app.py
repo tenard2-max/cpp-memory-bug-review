@@ -54,6 +54,7 @@ from samples_db import (
     import_samples_from_markdown,
     load_samples,
     register_false_positive,
+    clear_samples,
     set_vector_search_enabled,
 )
 from whitelist import add_name, load_whitelist, remove_name
@@ -690,7 +691,7 @@ def review_done_dialog() -> None:
         st.warning("모델 분석은 하지 않았습니다. 메모리·포인터·구조체가 있는 함수가 없어 소거만 되었습니다.")
     st.write(
         f"함수 {stats.get('functions', 0)}개 중 {stats.get('pruned', 0)}개는 분석 전에 제외했습니다. "
-        f"키워드 없는 긴 함수 조각 {int(stats.get('dropped_windows') or 0)}개는 모델에 넘기지 않았습니다. "
+        f"앵커 없는 구간 {int(stats.get('dropped_windows') or 0)}개는 소거해 모델에 넘기지 않았습니다. "
         f"발견 {findings}건."
     )
     if result.get("unconfirmed") and findings == 0:
@@ -1212,6 +1213,9 @@ def render_sample_admin() -> None:
         "수기 입력 대신 MD 파일로 등록합니다. "
         "다음 검토부터 키워드·벡터로 맞는 샘플을 종류별로 고르게, 최대 12개까지 프롬프트에 넣습니다."
     )
+    # 체크박스 위젯보다 먼저 키를 내려야 StreamlitAPIException 이 나지 않는다.
+    if st.session_state.pop("_clear_sample_reset_confirm", False):
+        st.session_state["sample_reset_confirm"] = False
     notice = st.session_state.pop("sample_notice", None)
     if notice:
         st.success(notice)
@@ -1297,6 +1301,24 @@ def render_sample_admin() -> None:
             else:
                 st.session_state["sample_notice"] = f"샘플 {count}건을 불러왔습니다."
                 st.rerun()
+
+    st.markdown("**초기화**")
+    st.caption(
+        "등록된 샘플을 모두 삭제합니다(0건). 예전 내장 기본 5건으로는 되돌리지 않습니다. "
+        "Chroma 샘플 벡터 인덱스도 비웁니다. 되돌릴 수 없으니 JSON 내보내기로 백업하세요."
+    )
+    reset_ok = st.checkbox("샘플 전체 삭제에 동의합니다", key="sample_reset_confirm")
+    if st.button("샘플 전체 삭제", type="secondary", disabled=not reset_ok):
+        try:
+            with st.spinner("샘플 삭제 중…"):
+                removed = clear_samples()
+        except Exception as error:
+            st.error(f"초기화 실패: {error}")
+        else:
+            # 체크박스 위젯 생성 뒤에는 같은 키를 직접 수정할 수 없다.
+            st.session_state["sample_notice"] = f"샘플 {removed}건을 삭제했습니다. 현재 0건입니다."
+            st.session_state["_clear_sample_reset_confirm"] = True
+            st.rerun()
 
     st.write(f"등록된 샘플 {len(samples)}건")
     if not samples:

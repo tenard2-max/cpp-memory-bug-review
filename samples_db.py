@@ -166,6 +166,25 @@ def delete_sample(sample_id: int) -> None:
     save_samples(samples)
 
 
+def clear_samples() -> int:
+    """등록 샘플을 모두 지우고 벡터 인덱스를 비운다. 반환은 삭제 전 건수."""
+    before = len(load_samples())
+    save_samples([], sync_vector=False)
+    try:
+        from vector_store import is_available, rebuild_sample_index
+
+        if is_available():
+            rebuild_sample_index([])
+    except Exception:
+        pass
+    return before
+
+
+def reset_samples_to_default() -> int:
+    """호환용. 더 이상 내장 5건으로 되돌리지 않고 clear_samples()와 같다."""
+    return clear_samples()
+
+
 def import_samples(raw: list, replace: bool) -> int:
     """JSON 배열을 추가하거나 전체 목록을 그 내용으로 바꾼다."""
     if not isinstance(raw, list):

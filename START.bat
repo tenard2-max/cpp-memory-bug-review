@@ -19,7 +19,7 @@ powercfg /SETACTIVE e9a42b02-d5df-448d-aa00-03f14749eb61 >nul 2>&1
 if errorlevel 1 powercfg /SETACTIVE 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c >nul 2>&1
 
 REM WDDM이 CUDA를 Idle로 오인하면 클럭이 700MHz에 묶인다. WPF는 -STA 필수.
-start "GPU-Wake" powershell.exe -STA -NoProfile -ExecutionPolicy Bypass -File "%~dp0GPU_WAKE.ps1"
+start "GPU-Turbo" powershell.exe -STA -NoProfile -ExecutionPolicy Bypass -File "%~dp0GPU_TURBO.ps1"
 
 where py >nul 2>&1
 if errorlevel 1 goto NO_PY

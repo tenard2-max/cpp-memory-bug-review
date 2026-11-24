@@ -2,4 +2,4 @@
 header_roots:
   - d:\work\src
 include_inline_bodies: false
-context_token_budget: 3048
+context_token_budget: 1500

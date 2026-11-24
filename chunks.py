@@ -13,10 +13,13 @@ MEMORY_CALL = re.compile(
     r"|SAFE_DELETE|SAFE_FREE|SAFE_RELEASE",
     re.IGNORECASE,
 )
-MAX_CHUNK_LINES = 500
-SLIDE_MIN_LINES = 500
-WINDOW_LINES = 500
-OVERLAP_LINES = 50
+# 첫 안정 샘플(samples/use_after_free.cpp, 88줄)을 상한으로 둔다.
+# 그보다 긴 함수는 창으로 나누고, 앵커(메모리·포인터·의심) 없는 창은 소거한다.
+STABLE_MAX_LINES = 88
+MAX_CHUNK_LINES = STABLE_MAX_LINES
+SLIDE_MIN_LINES = STABLE_MAX_LINES
+WINDOW_LINES = STABLE_MAX_LINES
+OVERLAP_LINES = 22
 STRUCT_WORD = re.compile(r"\bstruct\b")
 POINTER_MARK = re.compile(r"->|(?<![&])&(?!&)\s*[A-Za-z_]")
 _TYPE_PREFIX = {
@@ -175,7 +178,8 @@ def _contains(ranges: list[tuple[int, int]], line_index: int) -> tuple[int, int]
 
 
 def _windows(start: int, end: int, anchors: list[int]) -> tuple[list[tuple[int, int]], int]:
-    """500줄 이하는 통째로 두고, 더 긴 함수는 키워드가 있는 500줄 창만 남긴다."""
+    """안정 상한(88줄) 이하는 통째로 두고, 더 긴 함수는 겹치는 창으로 나눈 뒤
+    앵커가 없는 창은 소거한다."""
     if end - start + 1 <= SLIDE_MIN_LINES:
         return [(start, end)], 0
     windows = _overlap_windows(start, end, WINDOW_LINES, OVERLAP_LINES)
@@ -200,7 +204,8 @@ def _overlap_windows(start: int, end: int, size: int, overlap: int) -> list[tupl
 def build_chunks(
     files: list[Path], issues: list[dict], project_root: Path | None = None
 ) -> tuple[list[dict], dict]:
-    """메모리·포인터·구조체가 없는 함수는 버리고, 500줄 초과 함수는 겹치는 창으로 나눈다."""
+    """메모리·포인터·구조체가 없는 함수는 버리고,
+    안정 상한(88줄) 초과 함수는 겹치는 창으로 나눈 뒤 무앵커 창을 소거한다."""
     from headers import HeaderIndex
 
     roots = []

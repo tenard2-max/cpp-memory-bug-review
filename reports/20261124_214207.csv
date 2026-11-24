@@ -1,0 +1,15 @@
+﻿파일명,줄 번호,함수명,버그 종류,확신도,현재 코드,수정 제안,근거
+use_after_free.cpp,228,trigger_all_20_errors,버퍼 넘침,High,"225: 
+226: 		// 3~5. 메모리
+227:     char ssTemp[10];
+228:     sprintf(ssTemp, ""dfsljsdlkfjsldkfdlfksldkfsjlfd"");
+229: 		
+230: 		memcpy( ssTemp, ""dlfkjsdklfjdslfksdjl"", 11);
+231: 		","snprintf(ssTemp, sizeof(ssTemp), ...);",강력 의심: sprintf(ssTemp)가 char[10] 스택 배열에 널 포함 최소 31바이트를 써 스택을 침범한다
+use_after_free.cpp,358,sample2_preflight,미초기화 읽기,High,"355:    
+356: }
+357: 
+358: static void sample2_preflight() {
+359:     sample2_util::run_safe_warmup();
+360: 
+361:     sample2_util::DeviceInfo devices[2];",sample2_util::DeviceInfo devices[2] = {0};,devices 배열의 요소가 초기화되지 않았습니다.

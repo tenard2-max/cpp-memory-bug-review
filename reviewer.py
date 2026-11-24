@@ -489,7 +489,7 @@ def review_paths(
         0.0,
         (
             f"분석 창 {total}개 시작 · 소거 {stats['pruned']}/{stats['functions']}함수 · "
-            f"키워드 없는 조각 {stats.get('dropped_windows', 0)}개 제외"
+            f"앵커 없는 구간 {stats.get('dropped_windows', 0)}개 소거"
         ),
     )
 
@@ -682,7 +682,7 @@ def review_paths(
         100.0,
         (
             f"검토 완료 · 분석 {total}/{total}창 · 소거 {stats['pruned']}/{stats['functions']}함수 · "
-            f"키워드 없는 조각 {stats.get('dropped_windows', 0)}개 제외"
+            f"앵커 없는 구간 {stats.get('dropped_windows', 0)}개 소거"
         ),
     )
     return result

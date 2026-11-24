@@ -2,7 +2,6 @@
   {
     "id": 1,
     "category": "미초기화 지역 변수 사용",
-    "bug_type": "uninitialized_read",
     "keywords": [
       "uninit_local",
       "volatile",
@@ -11,12 +10,12 @@
     "bad_code": "// 1. 미초기화 지역 변수 사용 (쓰레기 값 읽기)\nint uninit_local;\nvolatile int val1 = uninit_local + 1;",
     "good_code": "int uninit_local = 0;\nvolatile int val1 = uninit_local + 1;",
     "explanation": "int uninit_local; 선언 후 초기화 없이 uninit_local + 1 읽기 연산을 수행한다. 쓰레기 값 읽기로 UB다.",
-    "is_false_positive": false
+    "is_false_positive": false,
+    "bug_type": ""
   },
   {
     "id": 2,
     "category": "와일드 포인터 역참조",
-    "bug_type": "uninitialized_read",
     "keywords": [
       "wild_ptr",
       "포인터",
@@ -25,12 +24,12 @@
     "bad_code": "// 2. 와일드 포인터(미초기화 포인터) 역참조\nint* wild_ptr;\nvolatile int val2 = *wild_ptr;",
     "good_code": "int value = 0;\nint* wild_ptr = &value;\nvolatile int val2 = *wild_ptr;",
     "explanation": "int* wild_ptr; 주소 할당 없이 *wild_ptr 역참조를 수행한다. 와일드 포인터 접근으로 UB·크래시 위험이 있다.",
-    "is_false_positive": false
+    "is_false_positive": false,
+    "bug_type": ""
   },
   {
     "id": 3,
     "category": "스택 버퍼 오버플로우 (sprintf)",
-    "bug_type": "buffer_overflow",
     "keywords": [
       "sprintf",
       "ssTemp",
@@ -39,12 +38,12 @@
     "bad_code": "// 3. 스택 버퍼 오버플로우\nchar ssTemp[10];\nsprintf(ssTemp, \"dfsljsdlkfjsldkfdlfksldkfsjlfd\");",
     "good_code": "char ssTemp[10];\nsnprintf(ssTemp, sizeof(ssTemp), \"dfsljsdlkfjsldkfdlfksldkfsjlfd\");",
     "explanation": "10바이트 배열 ssTemp[10]에 긴 문자열을 sprintf로 복사한다. 널 포함 길이가 버퍼를 초과해 스택을 침범한다.",
-    "is_false_positive": false
+    "is_false_positive": false,
+    "bug_type": ""
   },
   {
     "id": 4,
     "category": "스택 버퍼 오버플로우 (memcpy)",
-    "bug_type": "buffer_overflow",
     "keywords": [
       "memcpy",
       "ssTemp",
@@ -53,12 +52,12 @@
     "bad_code": "// 4. 스택 버퍼 오버플로우\nchar ssTemp[10];\nmemcpy(ssTemp, \"dlfkjsdklfjdslfksdjl\", 11);",
     "good_code": "char ssTemp[10];\nmemcpy(ssTemp, \"dlfkjsdklfjdslfksdjl\", sizeof(ssTemp));\nssTemp[sizeof(ssTemp) - 1] = '\\0';",
     "explanation": "10바이트 배열 ssTemp[10]에 memcpy(..., 11)로 11바이트를 복사한다. 1바이트 초과로 스택 버퍼 오버플로우다.",
-    "is_false_positive": false
+    "is_false_positive": false,
+    "bug_type": ""
   },
   {
     "id": 5,
     "category": "스택 버퍼 오버플로우 (strcat)",
-    "bug_type": "buffer_overflow",
     "keywords": [
       "sprintf",
       "strcat",
@@ -67,12 +66,12 @@
     "bad_code": "// 5. 스택 버퍼 오버플로우\nchar ssTemp[10];\nsprintf(ssTemp, \"123456789\");\nstrcat(ssTemp, \"1234\");",
     "good_code": "char ssTemp[10];\nsnprintf(ssTemp, sizeof(ssTemp), \"123456789\");\nstrncat(ssTemp, \"1234\", sizeof(ssTemp) - strlen(ssTemp) - 1);",
     "explanation": "sprintf로 10바이트를 채운 뒤 strcat로 4바이트를 추가한다. 총 길이가 버퍼를 넘어 4바이트 초과 스택 오버플로우다.",
-    "is_false_positive": false
+    "is_false_positive": false,
+    "bug_type": ""
   },
   {
     "id": 6,
     "category": "동적 배열 미초기화 요소 읽기",
-    "bug_type": "uninitialized_read",
     "keywords": [
       "new",
       "dyn_arr",
@@ -81,12 +80,12 @@
     "bad_code": "// 6. 동적 할당 후 부분 초기화된 배열의 미정의 요소 읽기\nint* dyn_arr = new int[10];\ndyn_arr[0] = 1;\nvolatile int val5 = dyn_arr[5];\ndelete[] dyn_arr;",
     "good_code": "int* dyn_arr = new int[10]();\ndyn_arr[0] = 1;\nvolatile int val5 = dyn_arr[5];\ndelete[] dyn_arr;",
     "explanation": "new int[10] 할당 후 dyn_arr[0]만 초기화하고 쓰레기 값이 들어 있는 dyn_arr[5]를 읽는다.",
-    "is_false_positive": false
+    "is_false_positive": false,
+    "bug_type": ""
   },
   {
     "id": 7,
     "category": "조건부 초기화 누락 변수 사용",
-    "bug_type": "uninitialized_read",
     "keywords": [
       "cond_var",
       "flag",
@@ -95,12 +94,12 @@
     "bad_code": "// 7. 조건부 초기화 누락 변수 사용\nint cond_var;\nbool flag = false;\nif (flag) {\n    cond_var = 100;\n}\nvolatile int val7 = cond_var;",
     "good_code": "int cond_var = 0;\nbool flag = false;\nif (flag) {\n    cond_var = 100;\n}\nvolatile int val7 = cond_var;",
     "explanation": "flag가 false이므로 cond_var가 초기화되지 않은 상태로 val7에 대입된다. 조건부 초기화 누락 UB다.",
-    "is_false_positive": false
+    "is_false_positive": false,
+    "bug_type": ""
   },
   {
     "id": 8,
     "category": "미초기화 불리언 플래그 사용",
-    "bug_type": "uninitialized_read",
     "keywords": [
       "uninit_flag",
       "bool",
@@ -109,12 +108,12 @@
     "bad_code": "// 8. 미초기화 불리언 플래그 제어 흐름 사용\nbool uninit_flag;\nvolatile int val9 = uninit_flag ? 1 : 0;",
     "good_code": "bool uninit_flag = false;\nvolatile int val9 = uninit_flag ? 1 : 0;",
     "explanation": "bool uninit_flag; 초기화 없이 삼항 연산자 조건식으로 사용한다. 미초기화 bool 읽기 UB다.",
-    "is_false_positive": false
+    "is_false_positive": false,
+    "bug_type": ""
   },
   {
     "id": 9,
     "category": "메모리 누수",
-    "bug_type": "memory_leak",
     "keywords": [
       "new",
       "leak_ptr",
@@ -124,12 +123,12 @@
     "bad_code": "// 9. 메모리 누수 (Memory Leak)\nint* leak_ptr = new int(500);\n// delete leak_ptr; 누락됨",
     "good_code": "int* leak_ptr = new int(500);\ndelete leak_ptr;\nleak_ptr = 0;",
     "explanation": "int* leak_ptr = new int(500); 동적 할당 후 delete가 누락되어 메모리 누수가 난다.",
-    "is_false_positive": false
+    "is_false_positive": false,
+    "bug_type": ""
   },
   {
     "id": 10,
     "category": "이중 해제 Double Free",
-    "bug_type": "double_free",
     "keywords": [
       "delete",
       "double_ptr",
@@ -138,12 +137,12 @@
     "bad_code": "// 10. 이중 해제 (Double Free)\nint* double_ptr = new int(100);\ndelete double_ptr;\ndelete double_ptr;",
     "good_code": "int* double_ptr = new int(100);\ndelete double_ptr;\ndouble_ptr = 0;",
     "explanation": "delete double_ptr; 실행 후 동일 포인터를 다시 해제한다. Double Free로 힙 손상·크래시 위험이 있다.",
-    "is_false_positive": false
+    "is_false_positive": false,
+    "bug_type": ""
   },
   {
     "id": 11,
     "category": "힙 버퍼 오버플로우",
-    "bug_type": "buffer_overflow",
     "keywords": [
       "new",
       "heap_buf",
@@ -152,12 +151,12 @@
     "bad_code": "// 11. 힙 버퍼 오버플로우 (Heap Buffer Overflow)\nint* heap_buf = new int[5];\nheap_buf[5] = 999;\ndelete[] heap_buf;",
     "good_code": "int* heap_buf = new int[5];\nheap_buf[4] = 999;\ndelete[] heap_buf;",
     "explanation": "new int[5](인덱스 0~4) 할당 후 범위를 벗어난 heap_buf[5]에 쓴다. 힙 버퍼 오버플로우다.",
-    "is_false_positive": false
+    "is_false_positive": false,
+    "bug_type": ""
   },
   {
     "id": 12,
     "category": "스택 버퍼 오버플로우 (배열 경계)",
-    "bug_type": "buffer_overflow",
     "keywords": [
       "stack_buf",
       "오버플로우",
@@ -166,6 +165,7 @@
     "bad_code": "// 12. 스택 버퍼 오버플로우 (Stack Buffer Overflow)\nint stack_buf[3];\nstack_buf[5] = 777;",
     "good_code": "int stack_buf[3] = {0};\nstack_buf[2] = 777;",
     "explanation": "int stack_buf[3](인덱스 0~2) 선언 후 범위를 벗어난 stack_buf[5]에 쓴다. 스택 버퍼 오버플로우다.",
-    "is_false_positive": false
+    "is_false_positive": false,
+    "bug_type": ""
   }
 ]
