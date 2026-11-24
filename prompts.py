@@ -52,6 +52,11 @@ SYSTEM_PROMPT = """당신은 C와 C++ 소스의 메모리 버그와 초기화 �
 confidence는 high, medium, low 중 하나만 쓴다.
 요청이 메모리 버그 또는 초기화 버그 검토가 아니면 rejected를 true로 하고 findings는 빈 배열로 한다.
 버그가 없으면 rejected는 false, findings는 빈 배열로 한다.
+
+같은 창에 서로 다른 줄의 버그가 여러 개면 findings에 전부 넣어라. 앞부분 몇 건만 남기고 끝내지 마라.
+창의 마지막 줄까지 훑은 뒤 누수, 이중 해제, 힙/스택 범위 밖 접근도 빠뜨리지 마라.
+summary·evidence·after_code는 각각 한 문장·한 줄로 짧게 써서 토큰을 아껴라. before_code는 빈 문자열이다.
+file에는 [L0001] 줄 표식이 아니라 넘겨진 소스 파일명만 쓴다.
 """
 
 OUTPUT_SCHEMA = {
@@ -99,7 +104,10 @@ def build_system_prompt(memory_rules: str, sample_block: str = "", whitelist_blo
         text += "\n\n" + whitelist_block.strip()
     if sample_block.strip():
         text += "\n\n" + sample_block.strip()
-        text += "\n오탐 방지 사례와 같은 모양은 findings에 넣지 마라."
+        text += (
+            "\n오탐 방지 사례와 같은 모양은 findings에 넣지 마라. "
+            "버그 사례와 같은 패턴은 창 안에 있는 만큼 모두 보고하고, 일부만 골라내지 마라."
+        )
     return text
 
 
@@ -107,6 +115,9 @@ def build_user_prompt(chunks: list[dict], static_report: str, note: str) -> str:
     parts = [
         "다음 함수 조각에서 메모리 버그와 초기화 버그를 검증하라. 줄 번호는 [L0001] 안의 숫자다.",
         "before_code는 빈 문자열로 둔다. after_code는 고칠 코드 한 줄, summary와 evidence는 각각 한 문장만 적는다.",
+        "같은 함수에 버그가 여러 개면 findings에 모두 넣어라. 대표 한두 건만 남기지 마라.",
+        "파일 뒤쪽(누수·이중 해제·힙/스택 범위 초과)도 앞쪽과 같이 보고하라. 출력이 길어도 findings 배열을 끝까지 닫아라.",
+        "file 필드는 조각 헤더의 소스 파일명만 쓰고, L0001 같은 줄 표식을 파일명으로 쓰지 마라.",
     ]
     cleaned = note.strip()
     if cleaned:

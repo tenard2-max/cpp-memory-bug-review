@@ -36,8 +36,10 @@ POLISH_MODELS = (
     "qwen2.5-coder:7b",
 )
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
-OLLAMA_OPTIONS = {"temperature": 0.0, "num_ctx": 4096, "num_thread": 8, "num_predict": 512}
+OLLAMA_OPTIONS = {"temperature": 0.0, "num_ctx": 4096, "num_thread": 8, "num_predict": 2048}
 PREDICT_CHOICES = [512, 1024, 2048, 4096, 5120, 6144, 7168, 8190]
+# 다건 findings JSON(~100토큰×12≈1200+)이 잘리지 않도록 기본/하한은 2048.
+MIN_NUM_PREDICT = 2048
 # FAST=/no_think 기본. AUTO는 의심 시에만 Thinking.
 THINK_MODES = ("FAST", "AUTO", "DEEP")
 DEFAULT_THINK_MODE = "FAST"
@@ -294,8 +296,8 @@ def _line_cache(chunks: list[dict]) -> dict[str, list[str]]:
 def _fill_context(finding: dict, chunk: dict, lines_by_path: dict[str, list[str]]) -> dict:
     """줄 번호가 가리키는 원본 코드와 함수 이름을 리포트에 채운다."""
     lines = lines_by_path.get(chunk["path"], [])
-    if not finding["file"]:
-        finding["file"] = chunk["file"]
+    # 모델이 [L0012] 줄 표식을 파일명으로 오인하는 경우가 있어 청크 파일명을 강제한다.
+    finding["file"] = chunk["file"]
     if finding["line"] <= 0:
         finding["line"] = chunk["start"]
     finding["before_code"] = source_snippet(lines, finding["line"], radius=3)
@@ -417,12 +419,13 @@ def review_paths(
     project_root: Path | None = None,
     deepseek_model: str = DEFAULT_DEEPSEEK,
     llama_model: str = DEFAULT_LLAMA,
-    num_predict: int = 512,
+    num_predict: int = MIN_NUM_PREDICT,
     think_mode: str = DEFAULT_THINK_MODE,
     num_gpu: int | None = None,
     num_batch: int = 512,
 ) -> dict:
     """분석 모델이 창을 보고, 교차 검증이 켜진 경우에만 두 번째 모델이 다시 본다."""
+    num_predict = max(int(num_predict), MIN_NUM_PREDICT)
     mode = normalize_think_mode(think_mode)
     use_qwen3 = is_qwen3_model(model)
     prepared = prepare_review(paths, standard, project_root)
@@ -701,7 +704,7 @@ def _ollama_chat(
     user: str,
     ollama_url: str,
     timeout: int,
-    num_predict: int = 512,
+    num_predict: int = MIN_NUM_PREDICT,
     on_stream=None,
     on_wait=None,
     *,
@@ -719,7 +722,7 @@ def _ollama_chat(
     if not ollama_reachable(base):
         raise ReviewError(f"Ollama가 {base} 에서 응답하지 않습니다. Ollama를 실행하세요.")
     options = dict(OLLAMA_OPTIONS)
-    options["num_predict"] = num_predict
+    options["num_predict"] = max(int(num_predict), MIN_NUM_PREDICT)
     if temperature is not None:
         options["temperature"] = float(temperature)
     if top_p is not None:
@@ -771,19 +774,44 @@ def _ollama_chat(
     deadline = time.monotonic() + timeout
     timed_out = False
     incoming: queue.Queue = queue.Queue()
+    opened: queue.Queue = queue.Queue()
 
-    def read_lines() -> None:
+    def open_response() -> None:
+        """연결·모델 로딩 동안 메인 루프가 on_wait로 시계를 돌릴 수 있게 연다."""
         try:
-            while True:
-                raw_line = response.readline()
-                incoming.put(raw_line)
-                if not raw_line:
-                    break
+            opened.put(urllib.request.urlopen(request, timeout=timeout))
         except BaseException as error:
-            incoming.put(error)
+            opened.put(error)
 
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        opener = threading.Thread(target=open_response, daemon=True)
+        opener.start()
+        response = None
+        while response is None:
+            try:
+                outcome = opened.get(timeout=1.0)
+            except queue.Empty:
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    raise TimeoutError(f"Ollama 연결이 {timeout}초를 넘겼습니다.")
+                if on_wait:
+                    on_wait()
+                continue
+            if isinstance(outcome, BaseException):
+                raise outcome
+            response = outcome
+
+        def read_lines() -> None:
+            try:
+                while True:
+                    raw_line = response.readline()
+                    incoming.put(raw_line)
+                    if not raw_line:
+                        break
+            except BaseException as error:
+                incoming.put(error)
+
+        try:
             reader = threading.Thread(target=read_lines, daemon=True)
             reader.start()
             while time.monotonic() < deadline:
@@ -819,6 +847,11 @@ def _ollama_chat(
                     break
             else:
                 timed_out = True
+        finally:
+            try:
+                response.close()
+            except Exception:
+                pass
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
         if error.code == 404 and "not found" in detail.lower():
@@ -868,7 +901,7 @@ def cross_check_chunk(
     ollama_url: str,
     on_stream=None,
     on_wait=None,
-    num_predict: int = 512,
+    num_predict: int = MIN_NUM_PREDICT,
 ) -> dict:
     """교차 검증 모델이 같은 창과 1차 결과를 보고 오탐을 빼거나 누락을 보탠다."""
     return _ollama_chat(
@@ -877,7 +910,7 @@ def cross_check_chunk(
         build_cross_prompt(chunk, findings),
         ollama_url,
         timeout,
-        num_predict=num_predict,
+        num_predict=max(int(num_predict), MIN_NUM_PREDICT),
         on_stream=on_stream,
         on_wait=on_wait,
     )
@@ -890,7 +923,7 @@ def polish_findings(
     ollama_url: str,
     on_stream=None,
     on_wait=None,
-    num_predict: int = 512,
+    num_predict: int = MIN_NUM_PREDICT,
 ) -> tuple[list[dict], str]:
     """라마가 해설 문장만 다듬는다. 줄 번호와 버그 종류는 파이썬이 유지한다."""
     try:
@@ -900,7 +933,7 @@ def polish_findings(
             build_polish_prompt(findings),
             ollama_url,
             timeout,
-            num_predict=num_predict,
+            num_predict=max(int(num_predict), MIN_NUM_PREDICT),
             on_stream=on_stream,
             on_wait=on_wait,
         )
@@ -932,12 +965,13 @@ def review_chunks(
     ollama_url: str = DEFAULT_OLLAMA_URL,
     on_stream=None,
     on_wait=None,
-    num_predict: int = 512,
+    num_predict: int = MIN_NUM_PREDICT,
     think_stage: str | None = None,
     num_gpu: int | None = None,
     num_batch: int = 512,
 ) -> dict:
     rules = load_memory_rules(RULES_PATH)
+    num_predict = max(int(num_predict), MIN_NUM_PREDICT)
     picked = _samples_for(chunks)
     if len(chunks) == 1:
         chunks[0]["injected_samples"] = [
@@ -952,6 +986,10 @@ def review_chunks(
             }
             for item in picked
         ]
+    # finding 1건 ≈ 100토큰. 샘플 다건(예: 12)이면 512/1024에서 JSON이 앞에서 잘린다.
+    bug_sample_count = sum(1 for item in picked if not item.get("is_false_positive"))
+    min_predict = max(2048, bug_sample_count * 160 + 256) if bug_sample_count else 2048
+    effective_predict = max(int(num_predict), min_predict)
     call_think = None
     call_temperature = None
     call_top_p = None
@@ -969,7 +1007,7 @@ def review_chunks(
         build_user_prompt(chunks, static_report, note),
         ollama_url,
         timeout,
-        num_predict=num_predict,
+        num_predict=effective_predict,
         on_stream=on_stream,
         on_wait=on_wait,
         think=call_think,

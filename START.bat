@@ -1,9 +1,17 @@
 @echo off
 cd /d "%~dp0"
+REM 로컬 폐쇄망: 텔레메트리·HF 온라인 체크 차단, Ollama 루프백 고정
+set ANONYMIZED_TELEMETRY=False
+set CHROMA_TELEMETRY=False
+set HF_HUB_OFFLINE=1
+set TRANSFORMERS_OFFLINE=1
+set HF_DATASETS_OFFLINE=1
+set OLLAMA_HOST=127.0.0.1:11434
 echo BAT: %~f0
 echo APP: %~dp0app.py
 echo MODEL: qwen2.5-coder:7b
 echo URL: http://127.0.0.1:8501
+echo SECURITY: HF/Chroma offline + Streamlit stats off
 echo.
 
 REM GPU가 35W/700MHz에 멈추면 LLM이 급격히 느려진다. 최고의 성능 전원으로 올린다.

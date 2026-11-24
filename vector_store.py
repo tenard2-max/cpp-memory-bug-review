@@ -4,8 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
+
+# 임베딩/Chroma 로드 전 텔레메트리·허브 온라인 체크 차단
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+os.environ.setdefault("CHROMA_TELEMETRY", "False")
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
 
 DATA_DIR = Path(__file__).with_name("data")
 CHROMA_DIR = DATA_DIR / "chroma"

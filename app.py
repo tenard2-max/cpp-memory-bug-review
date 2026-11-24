@@ -6,6 +6,14 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
+
+# 다른 라이브러리 import 전에 텔레메트리·HF 오프라인 차단을 건다.
+from security_audit import apply_local_security_env, ensure_streamlit_config
+
+apply_local_security_env()
+ensure_streamlit_config()
 
 import pandas as pd
 import streamlit as st
@@ -38,10 +46,12 @@ from reviewer import (
     review_paths,
 )
 from samples_db import (
+    SAMPLE_MD_TEMPLATE,
     SAMPLES_PATH,
     add_sample,
     delete_sample,
     import_samples,
+    import_samples_from_markdown,
     load_samples,
     register_false_positive,
     set_vector_search_enabled,
@@ -63,6 +73,23 @@ def _choose_project_folder() -> str:
     except Exception:
         return ""
     return selected or ""
+
+
+def _choose_files(title: str, patterns: list[tuple[str, str]], *, max_count: int = 5) -> list[str]:
+    """파일 다중 선택(최대 max_count). 실패 시 빈 목록."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        window = tk.Tk()
+        window.withdraw()
+        window.attributes("-topmost", True)
+        selected = filedialog.askopenfilenames(title=title, filetypes=patterns)
+        window.destroy()
+    except Exception:
+        return []
+    paths = [str(item) for item in (selected or [])][:max_count]
+    return paths
 
 
 def _ollama_exe() -> str:
@@ -120,6 +147,31 @@ BUG_LABELS = {
     "other_memory": "기타 메모리",
 }
 SCREEN_OPTIONS = ["코드 검토", "헤더 인덱스", "샘플 학습 관리", "초기화 화이트리스트"]
+DIALOG_FLAGS = (
+    "_open_options",
+    "_open_server",
+    "_open_security",
+    "_open_header_prep",
+    "show_done_dialog",
+)
+
+
+def _close_all_dialogs(*, keep: str | None = None) -> None:
+    """메뉴/화면 전환 때 이전 다이얼로그가 다시 뜨지 않게 닫는다."""
+    for key in DIALOG_FLAGS:
+        if keep and key == keep:
+            continue
+        st.session_state[key] = False
+
+
+def _format_stopwatch(seconds: float) -> str:
+    """초를 스톱워치 표기(MM:SS 또는 H:MM:SS)로 바꾼다."""
+    total = max(0, int(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
 
 st.set_page_config(page_title="C++ 메모리·초기화 버그 검토", layout="wide")
 st.markdown(
@@ -467,6 +519,8 @@ with st.container(key="app_header", border=False):
                 type="primary" if selected else "secondary",
                 use_container_width=True,
             ):
+                # 화면 바꿀 때 옵션/서버/보안/전처리 창을 모두 닫아 이전 창 잔존을 막는다.
+                _close_all_dialogs()
                 st.session_state.screen = name
                 st.rerun()
         if st.button("옵션", key="nav-option", type="secondary", use_container_width=True):
@@ -479,15 +533,24 @@ with st.container(key="app_header", border=False):
             st.session_state["dlg_cross_enabled"] = bool(st.session_state.get("cross_enabled"))
             st.session_state["dlg_deepseek_model"] = st.session_state.get("deepseek_model", DEFAULT_MODEL)
             st.session_state["dlg_llama_model"] = st.session_state.get("llama_model", DEFAULT_LLAMA)
-            st.session_state["dlg_num_predict"] = st.session_state.get("num_predict", 1024)
+            st.session_state["dlg_num_predict"] = st.session_state.get("num_predict", 2048)
             st.session_state["dlg_cpp_standard"] = st.session_state.get("cpp_standard", "c++03")
             st.session_state["dlg_vector_search"] = bool(st.session_state.get("vector_search", True))
+            _close_all_dialogs(keep="_open_options")
             st.session_state["_open_options"] = True
             st.rerun()
         if st.button("서버 설정", key="nav-server", type="secondary", use_container_width=True):
+            _close_all_dialogs(keep="_open_server")
             st.session_state["_open_server"] = True
             st.rerun()
+        if st.button("보안점검", key="nav-security", type="secondary", use_container_width=True):
+            _close_all_dialogs(keep="_open_security")
+            st.session_state["_open_security"] = True
+            st.rerun()
 screen = st.session_state.screen
+# 헤더 인덱스가 아니면 전처리 창은 강제로 닫는다.
+if screen != "헤더 인덱스":
+    st.session_state["_open_header_prep"] = False
 
 if "vram" not in st.session_state:
     st.session_state.vram = "8"
@@ -510,12 +573,12 @@ if "deepseek_model" not in st.session_state:
 if "llama_model" not in st.session_state:
     st.session_state.llama_model = DEFAULT_LLAMA
 if "num_predict" not in st.session_state:
-    st.session_state.num_predict = 1024
+    st.session_state.num_predict = 2048
 if "cpp_standard" not in st.session_state:
     st.session_state.cpp_standard = "c++03"
-if st.session_state.get("predict_default_version") != 2:
-    st.session_state.num_predict = 1024
-    st.session_state.predict_default_version = 2
+if st.session_state.get("predict_default_version") != 3:
+    st.session_state.num_predict = 2048
+    st.session_state.predict_default_version = 3
 if st.session_state.get("model_defaults_version") != 5:
     st.session_state.model_name = DEFAULT_MODEL
     st.session_state.deepseek_model = DEFAULT_MODEL
@@ -605,7 +668,7 @@ def _commit_options_from_dialog() -> None:
         st.session_state.get("dlg_llama_model") or st.session_state.get("llama_model") or DEFAULT_LLAMA
     )
     st.session_state.num_predict = int(
-        st.session_state.get("dlg_num_predict") or st.session_state.get("num_predict") or 1024
+        st.session_state.get("dlg_num_predict") or st.session_state.get("num_predict") or 2048
     )
     st.session_state.cpp_standard = str(
         st.session_state.get("dlg_cpp_standard") or st.session_state.get("cpp_standard") or "c++03"
@@ -654,7 +717,7 @@ def options_dialog() -> None:
     st.session_state.setdefault("dlg_cross_enabled", bool(st.session_state.get("cross_enabled")))
     st.session_state.setdefault("dlg_deepseek_model", st.session_state.get("deepseek_model", DEFAULT_MODEL))
     st.session_state.setdefault("dlg_llama_model", st.session_state.get("llama_model", DEFAULT_LLAMA))
-    st.session_state.setdefault("dlg_num_predict", st.session_state.get("num_predict", 1024))
+    st.session_state.setdefault("dlg_num_predict", st.session_state.get("num_predict", 2048))
     st.session_state.setdefault("dlg_cpp_standard", st.session_state.get("cpp_standard", "c++03"))
     st.session_state.setdefault("dlg_vector_search", bool(st.session_state.get("vector_search", True)))
 
@@ -726,8 +789,8 @@ def options_dialog() -> None:
         "토큰 상한",
         PREDICT_CHOICES,
         key="dlg_num_predict",
-        help="한 번 호출에서 생성하는 최대 토큰. 속도 우선이면 512~1024. "
-        "4096은 출력이 길어져 총 시간이 더 걸립니다. 기본 1024.",
+        help="한 번 호출에서 생성하는 최대 토큰. 다건 탐지는 2048 권장. "
+        "속도 우선이면 512~1024, 4096은 총 시간이 더 걸립니다.",
     )
     st.selectbox(
         "cppcheck 언어 표준",
@@ -872,6 +935,178 @@ if st.session_state.get("_open_server"):
     server_dialog()
 
 
+@st.dialog("보안점검 — 로컬 폐쇄성 검증")
+def security_audit_dialog() -> None:
+    """네트워크 격리·아웃바운드·텔레메트리/소스 감사를 증빙한다."""
+    from security_audit import manual_checklist, run_security_audit
+
+    st.caption(
+        "로컬 LLM(Qwen/Llama)+RAG가 외부로 데이터를 보내지 않는지 "
+        "①격리 테스트 안내 ②netstat 감시 ③소스·텔레메트리 감사로 검증합니다."
+    )
+    tab1, tab2, tab3 = st.tabs(["1. 격리 테스트", "2. 아웃바운드 감시", "3. 코드·텔레메트리"])
+
+    with tab1:
+        st.markdown(
+            """
+**가장 확실한 증빙**
+1. Ollama 모델·BGE-M3 캐시를 미리 받아 둔다.  
+2. Wi-Fi/랜을 끊거나 비행기 모드로 **완전 오프라인** 한다.  
+3. `START.bat` → `http://127.0.0.1:8501` 에서 소스 검토(RAG+LLM)를 실행한다.  
+
+**판정:** 오프라인에서 에러 없이 분석되면 로컬 자원만 사용한 것이다.  
+`ConnectionError` / HuggingFace 접속 실패가 나면 외부 호출 경로를 고쳐야 한다.
+            """.strip()
+        )
+        for item in manual_checklist():
+            if item["id"] == "offline":
+                st.checkbox(item["title"], key=f"sec_chk_{item['id']}", help=item["detail"])
+
+    with tab2:
+        st.markdown(
+            """
+분석 실행 중 관리자 CMD에서:
+
+`netstat -ano | findstr ESTABLISHED`
+
+python.exe / ollama.exe PID의 원격 주소가 **127.0.0.1·사설망만**이면 정상.  
+공인 IP가 ESTABLISHED면 유출 의심.
+
+선택: Windows 방화벽에서 python.exe·ollama.exe **아웃바운드 차단** 후에도 분석되면 외부 경로는 봉쇄된 것.
+            """.strip()
+        )
+        for item in manual_checklist():
+            if item["id"] in {"netstat", "firewall"}:
+                st.checkbox(item["title"], key=f"sec_chk_{item['id']}", help=item["detail"])
+
+    with tab3:
+        st.markdown(
+            """
+자동 점검 항목:
+- `ANONYMIZED_TELEMETRY` / `HF_HUB_OFFLINE` / `TRANSFORMERS_OFFLINE`
+- `.streamlit/config.toml` → `gatherUsageStats = false`, bind `127.0.0.1`
+- 프로젝트 `.py` 외부 URL·상용 AI API 엔드포인트 문자열 스캔
+- Ollama URL이 로컬인지
+- netstat 스냅샷(공인 IP ESTABLISHED)
+            """.strip()
+        )
+        for item in manual_checklist():
+            if item["id"] in {"telemetry", "ollama_bind"}:
+                st.checkbox(item["title"], key=f"sec_chk_{item['id']}", help=item["detail"])
+
+    run_col, close_col = st.columns(2)
+    if run_col.button("자동 점검 실행", type="primary", use_container_width=True):
+        with st.spinner("보안 점검 중"):
+            report = run_security_audit(ollama_url=str(st.session_state.get("ollama_url") or DEFAULT_OLLAMA_URL))
+        st.session_state["security_report"] = report
+        if report.get("auto_ok"):
+            st.success(report.get("summary") or "자동 항목 통과")
+        else:
+            st.warning(report.get("summary") or "주의 항목 있음")
+        st.caption(f"증빙: {report.get('md_path')}")
+
+    report = st.session_state.get("security_report")
+    if report:
+        st.write(
+            f"자동 판정: {'통과' if report.get('auto_ok') else '주의'} · "
+            f"인터넷 지금: {'연결' if report.get('internet_now') else '오프라인'} · "
+            f"소스 findings {len((report.get('source_scan') or {}).get('findings') or [])}건 · "
+            f"netstat 의심 {len((report.get('netstat') or {}).get('suspects') or [])}건"
+        )
+        findings = (report.get("source_scan") or {}).get("findings") or []
+        if findings:
+            st.dataframe(pd.DataFrame(findings), use_container_width=True, hide_index=True)
+        suspects = (report.get("netstat") or {}).get("suspects") or []
+        if suspects:
+            st.error("공인 IP ESTABLISHED 감지")
+            st.dataframe(pd.DataFrame(suspects), use_container_width=True, hide_index=True)
+        env_rows = (report.get("env") or {}).get("rows") or []
+        if env_rows:
+            st.dataframe(pd.DataFrame(env_rows), use_container_width=True, hide_index=True)
+        md_path = Path(report.get("md_path") or "")
+        if md_path.is_file():
+            st.download_button(
+                "증빙 마크다운 받기",
+                md_path.read_bytes(),
+                file_name=md_path.name,
+                mime="text/markdown",
+            )
+
+    if close_col.button("닫기", use_container_width=True):
+        st.session_state["_open_security"] = False
+        st.rerun()
+
+
+if st.session_state.get("_open_security"):
+    security_audit_dialog()
+
+
+@st.dialog("DB(헤더) 전처리")
+def header_preprocess_dialog() -> None:
+    """CPP가 쓰는 struct/typedef만 추려 슬림 헤더를 만든다."""
+    from header_preprocess import MAX_SELECT, OUT_DIR, preprocess_headers
+
+    st.caption(
+        f"이미 전처리된 헤더·CPP를 각각 최대 {MAX_SELECT}개까지 고릅니다. "
+        f"CPP 기준으로 struct/typedef만 남겨 `{OUT_DIR.name}/`에 저장합니다."
+    )
+    if "prep_headers" not in st.session_state:
+        st.session_state.prep_headers = []
+    if "prep_cpps" not in st.session_state:
+        st.session_state.prep_cpps = []
+
+    header_col, cpp_col = st.columns(2)
+    if header_col.button("헤더 선택", use_container_width=True):
+        chosen = _choose_files(
+            "헤더 선택 (최대 5개)",
+            [("Header", "*.h *.hpp *.hh *.hxx"), ("All", "*.*")],
+            max_count=MAX_SELECT,
+        )
+        if chosen:
+            st.session_state.prep_headers = chosen
+            st.rerun()
+    if cpp_col.button("CPP 선택", use_container_width=True):
+        chosen = _choose_files(
+            "CPP 선택 (최대 5개)",
+            [("C/C++", "*.c *.cc *.cpp *.cxx"), ("All", "*.*")],
+            max_count=MAX_SELECT,
+        )
+        if chosen:
+            st.session_state.prep_cpps = chosen
+            st.rerun()
+
+    headers = list(st.session_state.get("prep_headers") or [])
+    cpps = list(st.session_state.get("prep_cpps") or [])
+    st.write("헤더:", ", ".join(Path(p).name for p in headers) or "(없음)")
+    st.write("CPP:", ", ".join(Path(p).name for p in cpps) or "(없음)")
+
+    run_col, close_col = st.columns(2)
+    if run_col.button("추출 실행", type="primary", use_container_width=True, disabled=not (headers and cpps)):
+        try:
+            with st.spinner("슬림 헤더 생성 중"):
+                result = preprocess_headers(
+                    [Path(p) for p in headers],
+                    [Path(p) for p in cpps],
+                )
+            st.session_state["prep_result"] = result
+            st.success(
+                f"심볼 {result['picked_count']}개 / 헤더 전체 {result['header_symbol_total']}개 → "
+                f"{result['out_path']}"
+            )
+            st.write("포함:", ", ".join(result.get("picked_names") or []) or "(없음)")
+        except ValueError as error:
+            st.error(str(error))
+        except OSError as error:
+            st.error(f"저장 실패: {error}")
+    if close_col.button("닫기", use_container_width=True):
+        st.session_state["_open_header_prep"] = False
+        st.rerun()
+
+
+if st.session_state.get("_open_header_prep") and st.session_state.get("screen") == "헤더 인덱스":
+    header_preprocess_dialog()
+
+
 def render_header_index() -> None:
     """설정 파일의 헤더 루트를 보여주고, SQLite 심볼 인덱스를 만들거나 갱신한다."""
     from symbol_index import build_index, index_status, load_config, save_header_roots
@@ -884,6 +1119,14 @@ def render_header_index() -> None:
         st.session_state.context_token_budget = min(4096, max(1500, int(config["context_token_budget"])))
         st.session_state.context_budget_version = 1
     st.caption("헤더 파일은 하나씩 고르지 않습니다. 아래 루트는 config/index.yaml 에 저장되고, 그 안의 헤더만 인덱싱합니다.")
+    prep_col, _ = st.columns([1, 3])
+    if prep_col.button("DB(헤더) 전처리", type="secondary", use_container_width=True):
+        _close_all_dialogs(keep="_open_header_prep")
+        st.session_state["_open_header_prep"] = True
+        st.rerun()
+    prev = st.session_state.get("prep_result")
+    if prev:
+        st.caption(f"최근 전처리: {prev.get('picked_count', 0)}심볼 → {prev.get('out_path', '')}")
     st.text_area("헤더 루트", key="header_roots_text", height=120, help="한 줄에 폴더 하나. 예: D:\\Work\\src")
     save_column, budget_column = st.columns([1, 2], vertical_alignment="bottom")
     budget_column.number_input(
@@ -963,60 +1206,97 @@ def render_header_index() -> None:
 
 
 def render_sample_admin() -> None:
-    """화면에서 버그 샘플과 오탐 예외를 추가하고, 지우고, JSON으로 주고받는다."""
+    """MD 파일로 버그 샘플을 등록하고, 목록을 관리한다."""
     st.subheader("샘플 학습 관리")
-    st.caption("저장한 샘플은 다음 검토부터 바로 쓰입니다. 지금 보는 함수와 키워드가 맞는 샘플만 최대 3개 프롬프트에 넣습니다.")
+    st.caption(
+        "수기 입력 대신 MD 파일로 등록합니다. "
+        "다음 검토부터 키워드·벡터로 맞는 샘플을 종류별로 고르게, 최대 12개까지 프롬프트에 넣습니다."
+    )
+    notice = st.session_state.pop("sample_notice", None)
+    if notice:
+        st.success(notice)
     try:
         samples = load_samples()
     except ValueError as error:
         st.error(str(error))
         return
 
-    with st.form("new_sample", clear_on_submit=True):
-        category = st.text_input("버그 종류", placeholder="조기 리턴 시 미해제")
-        keywords = st.text_input("키워드", placeholder="malloc, return")
-        bad_code = st.text_area("문제 코드", height=140)
-        good_code = st.text_area("수정 코드", height=100)
-        explanation = st.text_area("해설", height=80)
-        false_positive = st.checkbox("오탐 방지 (이 패턴은 정상 코드)")
-        submitted = st.form_submit_button("샘플 저장", type="primary")
-    if submitted:
+    st.markdown("**MD로 샘플 등록**")
+    st.caption(
+        "필수 절: `## 버그 종류` · `## 키워드` · `## 문제 코드` · `## 수정 코드` · `## 해설` · "
+        "`## 오탐 방지`(예/아니오). 여러 건은 `---` 로 구분합니다."
+    )
+    samples_dir = Path("samples")
+    local_mds = sorted(samples_dir.glob("*.md")) if samples_dir.is_dir() else []
+    if local_mds:
+        pick = st.selectbox(
+            "프로젝트 samples/ 폴더에서 선택",
+            options=[""] + [path.name for path in local_mds],
+            format_func=lambda name: "(선택)" if not name else name,
+            key="sample_md_local_pick",
+        )
+    else:
+        pick = ""
+    tmpl_col, _ = st.columns([1, 2])
+    tmpl_col.download_button(
+        "MD 템플릿 받기",
+        SAMPLE_MD_TEMPLATE.encode("utf-8"),
+        file_name="bug_sample_template.md",
+        mime="text/markdown",
+    )
+    md_files = st.file_uploader(
+        "MD 파일 선택 (여러 개 가능)",
+        type=["md", "markdown"],
+        accept_multiple_files=True,
+        key="sample_md_import",
+    )
+    replace_md = st.checkbox("등록 시 기존 샘플을 모두 교체", key="sample_md_replace")
+    can_register = bool(md_files) or bool(pick)
+    if st.button("MD 등록", type="primary", disabled=not can_register):
+        total = 0
         try:
-            add_sample(
-                {
-                    "category": category,
-                    "keywords": keywords,
-                    "bad_code": bad_code,
-                    "good_code": good_code,
-                    "explanation": explanation,
-                    "is_false_positive": false_positive,
-                }
-            )
-        except ValueError as error:
-            st.error(str(error))
+            with st.spinner("MD 등록 중… (벡터 인덱스는 마지막에 한 번만 맞춥니다)"):
+                texts: list[str] = []
+                if pick:
+                    texts.append((samples_dir / pick).read_text(encoding="utf-8-sig"))
+                for item in md_files or []:
+                    texts.append(item.getvalue().decode("utf-8-sig"))
+                if replace_md:
+                    first, *rest = texts
+                    total += import_samples_from_markdown(first, replace=True)
+                    for text in rest:
+                        total += import_samples_from_markdown(text, replace=False)
+                else:
+                    for text in texts:
+                        total += import_samples_from_markdown(text, replace=False)
+        except (UnicodeDecodeError, ValueError, OSError) as error:
+            st.error(f"MD 등록 실패: {error}")
+        except Exception as error:
+            st.error(f"MD 등록 중 오류: {error}")
         else:
-            st.session_state["sample_notice"] = "샘플을 저장했습니다. 다음 검토부터 반영됩니다."
+            st.session_state["sample_notice"] = f"MD에서 샘플 {total}건을 등록했습니다."
             st.rerun()
 
-    export_col, import_col = st.columns(2)
-    if SAMPLES_PATH.exists():
-        export_col.download_button(
-            "JSON 내보내기",
-            SAMPLES_PATH.read_bytes(),
-            file_name="bug_samples.json",
-            mime="application/json",
-        )
-    uploaded = import_col.file_uploader("JSON 불러오기", type=["json"], key="sample_import")
-    replace = st.checkbox("불러올 때 기존 샘플을 모두 교체")
-    if st.button("불러오기", disabled=uploaded is None):
-        try:
-            payload = json.loads(uploaded.getvalue().decode("utf-8-sig"))
-            count = import_samples(payload, replace)
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
-            st.error(f"불러오지 못했습니다: {error}")
-        else:
-            st.session_state["sample_notice"] = f"샘플 {count}건을 불러왔습니다."
-            st.rerun()
+    with st.expander("JSON 백업(선택)"):
+        export_col, import_col = st.columns(2)
+        if SAMPLES_PATH.exists():
+            export_col.download_button(
+                "JSON 내보내기",
+                SAMPLES_PATH.read_bytes(),
+                file_name="bug_samples.json",
+                mime="application/json",
+            )
+        uploaded = import_col.file_uploader("JSON 불러오기", type=["json"], key="sample_import")
+        replace = st.checkbox("JSON 불러올 때 기존 샘플을 모두 교체", key="sample_json_replace")
+        if st.button("JSON 불러오기", disabled=uploaded is None):
+            try:
+                payload = json.loads(uploaded.getvalue().decode("utf-8-sig"))
+                count = import_samples(payload, replace)
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+                st.error(f"불러오지 못했습니다: {error}")
+            else:
+                st.session_state["sample_notice"] = f"샘플 {count}건을 불러왔습니다."
+                st.rerun()
 
     st.write(f"등록된 샘플 {len(samples)}건")
     if not samples:
@@ -1380,7 +1660,21 @@ with st.container(border=True, key="work_canvas"):
                             st.rerun()
 
 
-    if st.button("메모리·초기화 버그 검토", type="primary", disabled=not online or model_missing):
+    review_col, time_col = st.columns([2, 3], vertical_alignment="center")
+    start_review = review_col.button(
+        "메모리·초기화 버그 검토",
+        type="primary",
+        disabled=not online or model_missing,
+        use_container_width=True,
+    )
+    time_slot = time_col.empty()
+    last_timing = st.session_state.get("last_review_timing") or {}
+    if last_timing.get("elapsed") is not None:
+        time_slot.markdown(f"**⏱ {_format_stopwatch(float(last_timing['elapsed']))}**")
+    else:
+        time_slot.markdown("**⏱ 00:00**")
+
+    if start_review:
         targets: list[Path] = []
         temp_dir = None
         project_text = st.session_state.project_root.strip()
@@ -1397,16 +1691,38 @@ with st.container(border=True, key="work_canvas"):
         if not targets:
             st.warning("파일 또는 프로젝트 폴더를 지정하세요.")
         else:
-            progress = st.progress(0, text="진행 0% · cppcheck로 함수를 나누는 중")
-            shown = {"percent": 0.0}
+            progress = st.progress(0, text="진행 0% · ⏱ 00:00 · cppcheck로 함수를 나누는 중")
+            shown = {"percent": 0.0, "label": "cppcheck로 함수를 나누는 중"}
+            started_at = time.monotonic()
+            stop_clock = threading.Event()
+            time_slot.markdown("**⏱ 00:00**")
+
+            def _paint_clock(force_label: str | None = None) -> str:
+                elapsed = time.monotonic() - started_at
+                clock = _format_stopwatch(elapsed)
+                label = force_label if force_label is not None else shown["label"]
+                time_slot.markdown(f"**⏱ {clock}**")
+                progress.progress(
+                    shown["percent"] / 100.0,
+                    text=f"진행 {shown['percent']:.0f}% · ⏱ {clock} · {cpu_label()} · {label}",
+                )
+                return clock
 
             def on_progress(percent: float, label: str) -> None:
                 shown["percent"] = max(0.0, min(float(percent), 100.0))
-                progress.progress(
-                    shown["percent"] / 100.0,
-                    text=f"진행 {shown['percent']:.0f}% · {cpu_label()} · {label}",
-                )
+                shown["label"] = label
+                _paint_clock(label)
 
+            def _clock_heartbeat() -> None:
+                """진행 콜백이 없어도 1초마다 스톱워치를 갱신한다."""
+                while not stop_clock.wait(1.0):
+                    try:
+                        _paint_clock()
+                    except Exception:
+                        break
+
+            clock_thread = threading.Thread(target=_clock_heartbeat, daemon=True)
+            clock_thread.start()
             try:
                 result = review_paths(
                     targets,
@@ -1424,18 +1740,37 @@ with st.container(border=True, key="work_canvas"):
                     llama_model=st.session_state.llama_model.strip(),
                     think_mode=review_think_mode,
                 )
+                elapsed = time.monotonic() - started_at
+                clock = _format_stopwatch(elapsed)
+                st.session_state["last_review_timing"] = {"elapsed": elapsed}
+                time_slot.markdown(f"**⏱ {clock}**")
                 markdown_path, csv_path = save_reports(result["findings"], BUG_LABELS)
                 result["markdown_path"] = str(markdown_path)
                 result["csv_path"] = str(csv_path)
+                result["elapsed_seconds"] = elapsed
                 st.session_state["last_review"] = result
                 st.session_state["show_done_dialog"] = True
             except ReviewError as error:
-                progress.progress(shown["percent"] / 100.0, text=f"진행 {shown['percent']:.0f}%에서 중단")
+                elapsed = time.monotonic() - started_at
+                clock = _format_stopwatch(elapsed)
+                progress.progress(
+                    shown["percent"] / 100.0,
+                    text=f"진행 {shown['percent']:.0f}% · ⏱ {clock}에서 중단",
+                )
+                time_slot.markdown(f"**⏱ {clock}**")
                 st.error(str(error))
             except OSError as error:
-                progress.progress(shown["percent"] / 100.0, text=f"진행 {shown['percent']:.0f}%에서 중단")
+                elapsed = time.monotonic() - started_at
+                clock = _format_stopwatch(elapsed)
+                progress.progress(
+                    shown["percent"] / 100.0,
+                    text=f"진행 {shown['percent']:.0f}% · ⏱ {clock}에서 중단",
+                )
+                time_slot.markdown(f"**⏱ {clock}**")
                 st.error(f"소스를 읽지 못했습니다: {error}")
             finally:
+                stop_clock.set()
+                clock_thread.join(timeout=2.0)
                 if temp_dir is not None:
                     temp_dir.cleanup()
 
