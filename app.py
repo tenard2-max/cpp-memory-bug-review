@@ -22,9 +22,11 @@ from server_status import (
 from sys_panel import render_command_panel, sample_host
 from report import save_reports
 from reviewer import (
+    DEFAULT_LLAMA,
     DEFAULT_MODEL,
     DEFAULT_OLLAMA_URL,
     DEFAULT_THINK_MODE,
+    POLISH_MODELS,
     PREDICT_CHOICES,
     QWEN3_MODEL,
     THINK_MODES,
@@ -476,7 +478,7 @@ with st.container(key="app_header", border=False):
             st.session_state["dlg_think_mode"] = normalize_think_mode(st.session_state.get("think_mode"))
             st.session_state["dlg_cross_enabled"] = bool(st.session_state.get("cross_enabled"))
             st.session_state["dlg_deepseek_model"] = st.session_state.get("deepseek_model", DEFAULT_MODEL)
-            st.session_state["dlg_llama_model"] = st.session_state.get("llama_model", DEFAULT_MODEL)
+            st.session_state["dlg_llama_model"] = st.session_state.get("llama_model", DEFAULT_LLAMA)
             st.session_state["dlg_num_predict"] = st.session_state.get("num_predict", 1024)
             st.session_state["dlg_cpp_standard"] = st.session_state.get("cpp_standard", "c++03")
             st.session_state["dlg_vector_search"] = bool(st.session_state.get("vector_search", True))
@@ -506,7 +508,7 @@ if "cross_enabled" not in st.session_state:
 if "deepseek_model" not in st.session_state:
     st.session_state.deepseek_model = DEFAULT_MODEL
 if "llama_model" not in st.session_state:
-    st.session_state.llama_model = DEFAULT_MODEL
+    st.session_state.llama_model = DEFAULT_LLAMA
 if "num_predict" not in st.session_state:
     st.session_state.num_predict = 1024
 if "cpp_standard" not in st.session_state:
@@ -514,11 +516,11 @@ if "cpp_standard" not in st.session_state:
 if st.session_state.get("predict_default_version") != 2:
     st.session_state.num_predict = 1024
     st.session_state.predict_default_version = 2
-if st.session_state.get("model_defaults_version") != 4:
+if st.session_state.get("model_defaults_version") != 5:
     st.session_state.model_name = DEFAULT_MODEL
     st.session_state.deepseek_model = DEFAULT_MODEL
-    st.session_state.llama_model = DEFAULT_MODEL
-    st.session_state.model_defaults_version = 4
+    st.session_state.llama_model = DEFAULT_LLAMA
+    st.session_state.model_defaults_version = 5
 if st.session_state.get("think_mode_defaults_version") != 1:
     st.session_state.think_mode = DEFAULT_THINK_MODE
     st.session_state.think_mode_defaults_version = 1
@@ -552,10 +554,31 @@ def _model_choices(current: str, installed: list[str] | None = None) -> list[str
     return choices
 
 
-def _select_model(label: str, key: str, help_text: str, installed: list[str]) -> None:
+def _polish_model_choices(current: str, installed: list[str] | None = None) -> list[str]:
+    """문장 정리는 빠른 Llama를 앞에 두고, 설치된 llama 계열도 넣는다."""
+    installed_llama = [
+        name for name in (installed or []) if name.strip().lower().startswith("llama")
+    ]
+    offered = (
+        *POLISH_MODELS,
+        DEFAULT_LLAMA,
+        current,
+        *installed_llama,
+        *(installed or []),
+    )
+    choices: list[str] = []
+    for name in offered:
+        cleaned = name.strip()
+        if cleaned and cleaned not in choices:
+            choices.append(cleaned)
+    return choices
+
+
+def _select_model(label: str, key: str, help_text: str, installed: list[str], *, polish: bool = False) -> None:
     """세 단계가 각자 설치된 모델 중 하나를 고르게 한다."""
-    current = str(st.session_state.get(key) or DEFAULT_MODEL)
-    choices = _model_choices(current, installed)
+    fallback = DEFAULT_LLAMA if polish else DEFAULT_MODEL
+    current = str(st.session_state.get(key) or fallback)
+    choices = _polish_model_choices(current, installed) if polish else _model_choices(current, installed)
     if current not in choices:
         # 위젯 생성 전에만 기본값을 보정한다.
         st.session_state[key] = choices[0]
@@ -579,7 +602,7 @@ def _commit_options_from_dialog() -> None:
         st.session_state.get("dlg_deepseek_model") or st.session_state.get("deepseek_model") or DEFAULT_MODEL
     )
     st.session_state.llama_model = str(
-        st.session_state.get("dlg_llama_model") or st.session_state.get("llama_model") or DEFAULT_MODEL
+        st.session_state.get("dlg_llama_model") or st.session_state.get("llama_model") or DEFAULT_LLAMA
     )
     st.session_state.num_predict = int(
         st.session_state.get("dlg_num_predict") or st.session_state.get("num_predict") or 1024
@@ -630,7 +653,7 @@ def options_dialog() -> None:
     )
     st.session_state.setdefault("dlg_cross_enabled", bool(st.session_state.get("cross_enabled")))
     st.session_state.setdefault("dlg_deepseek_model", st.session_state.get("deepseek_model", DEFAULT_MODEL))
-    st.session_state.setdefault("dlg_llama_model", st.session_state.get("llama_model", DEFAULT_MODEL))
+    st.session_state.setdefault("dlg_llama_model", st.session_state.get("llama_model", DEFAULT_LLAMA))
     st.session_state.setdefault("dlg_num_predict", st.session_state.get("num_predict", 1024))
     st.session_state.setdefault("dlg_cpp_standard", st.session_state.get("cpp_standard", "c++03"))
     st.session_state.setdefault("dlg_vector_search", bool(st.session_state.get("vector_search", True)))
@@ -692,12 +715,19 @@ def options_dialog() -> None:
         st.caption("Qwen3가 아니면 추론 모드는 무시되고 기존 temperature 0 호출을 씁니다.")
     st.checkbox("교차 검증", key="dlg_cross_enabled", help="켜져 있을 때만 두 번째 모델을 호출합니다. 기본은 끔입니다.")
     _select_model("교차 검증 모델", "dlg_deepseek_model", "교차 검증을 켰을 때 쓰는 모델. 기본은 qwen2.5-coder:7b", installed)
-    _select_model("문장 정리 모델", "dlg_llama_model", "발견 항목의 한국어 해설만 다듬습니다. 기본은 qwen2.5-coder:7b", installed)
+    _select_model(
+        "문장 정리 모델",
+        "dlg_llama_model",
+        "발견 항목의 한국어 해설만 다듬습니다. 권장: llama3.1:8b (FAST Thinking 없음)",
+        installed,
+        polish=True,
+    )
     st.selectbox(
         "토큰 상한",
         PREDICT_CHOICES,
         key="dlg_num_predict",
-        help="모델이 한 번 호출에서 생성하는 최대 토큰입니다. 기본은 1024입니다.",
+        help="한 번 호출에서 생성하는 최대 토큰. 속도 우선이면 512~1024. "
+        "4096은 출력이 길어져 총 시간이 더 걸립니다. 기본 1024.",
     )
     st.selectbox(
         "cppcheck 언어 표준",
@@ -710,7 +740,8 @@ def options_dialog() -> None:
         "벡터 검색 사용 (샘플·헤더·소스 RAG)",
         key="dlg_vector_search",
         help="켜면 BGE-M3(CPU)+Chroma로 샘플 few-shot, 헤더 심볼 보충, 프로젝트 소스 RAG를 씁니다. "
-        "꺼지면 키워드·exact·정규식만 씁니다. VRAM은 쓰지 않습니다.",
+        "임베딩은 CPU라 GPU VRAM을 거의 쓰지 않습니다. 다만 관련 소스·샘플이 프롬프트에 붙어 "
+        "첫 토큰(prefill)이 길어질 수 있습니다. 꺼지면 키워드·exact·정규식만 씁니다.",
     )
     try:
         from vector_store import (
@@ -1077,8 +1108,6 @@ _ollama_opts = ollama_call_options(
     int(st.session_state.num_predict),
     analysis_model,
 )
-if is_qwen3_model(analysis_model):
-    _ollama_opts["num_ctx"] = max(int(_ollama_opts["num_ctx"]), 16384)
 review_num_ctx = int(_ollama_opts["num_ctx"])
 review_think_mode = normalize_think_mode(st.session_state.get("think_mode"))
 standard = str(st.session_state.get("cpp_standard") or "c++03")
@@ -1138,6 +1167,12 @@ with status_column:
                 f"Qwen3 {mode} · num_ctx {_ollama_opts['num_ctx']} · "
                 + ("think=false" if mode == "FAST" else "AUTO/Thinking")
             )
+            if str(st.session_state.get("vram") or "") == "11":
+                st.warning(
+                    "11GB에서 qwen3:14b는 VRAM이 거의 꽉 차 초당 ~2토큰·첫 토큰 지연이 큽니다. "
+                    "속도가 우선이면 분석 모델을 qwen2.5-coder:7b로 바꾸세요. "
+                    "RAG(BGE-M3)는 CPU라 이 VRAM 점유의 원인이 아닙니다."
+                )
         else:
             call_note = (
                 f"temperature 0, num_ctx {_ollama_opts['num_ctx']}, "

@@ -131,7 +131,8 @@ def build_user_prompt(chunks: list[dict], static_report: str, note: str) -> str:
                 end = item.get("line_end") or 0
                 score = item.get("score")
                 score_note = f" score={float(score):.3f}" if isinstance(score, (int, float)) else ""
-                body = str(item.get("text") or "")[:900]
+                # 관련 소스가 길면 prefill만 커져 1080 Ti에서 첫 토큰이 더 늦어진다.
+                body = str(item.get("text") or "")[:400]
                 block += f"\n// [{file_name}:{start}-{end}] {func}{score_note}\n{body}"
             block += "\n위 관련 소스는 참고용이다. 현재 창 밖을 단정하지 마라."
         if suspects:

@@ -28,24 +28,28 @@ PROFILES = {
         "note": "7B, 컨텍스트 24576, 배치 1024. 남은 약 1GB는 프롬프트 처리에 씁니다.",
     },
     ("11", "16"): {
-        "model": "qwen3:14b",
-        "num_ctx": 16384,
-        "note": "GTX 1080 Ti 11GB에는 qwen3:14b(Q4)가 맞습니다. num_ctx=16384로 Full GPU 적재를 유지합니다.",
+        "model": "qwen2.5-coder:7b",
+        "num_ctx": 4096,
+        "num_batch": 512,
+        "num_gpu": 99,
+        "note": "1080 Ti 11GB 기본은 qwen2.5-coder:7b(빠른 편). qwen3:14b는 선택 가능하나 VRAM이 거의 꽉 차 초당 ~2토큰·첫 토큰 지연이 큽니다. 14B 쓸 때는 num_ctx 2048 고정.",
     },
     ("11", "32"): {
-        "model": "qwen3:14b",
-        "num_ctx": 16384,
-        "note": "11GB 그래픽 + 32GB 메인에서도 qwen3:14b, num_ctx=16384가 안정적입니다.",
+        "model": "qwen2.5-coder:7b",
+        "num_ctx": 4096,
+        "num_batch": 512,
+        "num_gpu": 99,
+        "note": "11GB는 7B가 체감 속도에 맞습니다. qwen3:14b는 FAST+/no_think·num_ctx 2048로만 권장. 문장 정리는 llama3.1:8b. RAG(BGE-M3)는 CPU라 VRAM을 안 씁니다.",
     },
     ("20", "16"): {
         "model": "qwen3:14b",
         "num_ctx": 16384,
-        "note": "20GB 그래픽에는 qwen3:14b를 권장합니다. 컨텍스트는 16384입니다.",
+        "note": "20GB 그래픽에는 qwen3:14b와 num_ctx 16384가 들어갑니다.",
     },
     ("20", "32"): {
         "model": "qwen3:14b",
         "num_ctx": 16384,
-        "note": "20GB 그래픽 + 32GB 메인에서는 qwen3:14b, num_ctx=16384가 맞습니다.",
+        "note": "20GB 그래픽 + 32GB 메인에서는 qwen3:14b, num_ctx 16384가 맞습니다.",
     },
 }
 
@@ -64,8 +68,7 @@ def hardware_profile(vram: str, ram: str) -> dict:
 
 
 def ollama_call_options(vram: str, ram: str, num_predict: int, model: str = "") -> dict:
-    """Ollama API options. 프로필의 num_ctx를 그대로 보낸다."""
-    del model
+    """Ollama API options. qwen3:14b는 11GB급에서 ctx 상한을 강제한다."""
     profile = hardware_profile(vram, ram)
     options: dict = {
         "temperature": 0.0,
@@ -77,4 +80,11 @@ def ollama_call_options(vram: str, ram: str, num_predict: int, model: str = "") 
         options["num_gpu"] = int(profile["num_gpu"])
     if "num_batch" in profile:
         options["num_batch"] = int(profile["num_batch"])
+    lowered = (model or "").strip().lower()
+    # 잘못된 vram 프로필(8GB 등)이어도 14B가 CPU로 새지 않게 막는다.
+    if lowered.startswith("qwen3:14b") or lowered.startswith("qwen3-14b"):
+        # 11GB에서 4096도 전용 VRAM ~10.4GB + 공유 메모리로 넘어가 체감이 급락한다.
+        options["num_ctx"] = min(int(options["num_ctx"]), 2048)
+        options["num_gpu"] = int(options.get("num_gpu") or 99)
+        options["num_batch"] = min(int(options.get("num_batch") or 256), 256)
     return options

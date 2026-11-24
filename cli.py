@@ -8,12 +8,12 @@ from pathlib import Path
 from hardware import hardware_profile, ollama_call_options
 from report import save_reports
 from reviewer import (
+    DEFAULT_LLAMA,
     DEFAULT_MODEL,
     DEFAULT_THINK_MODE,
     PREDICT_CHOICES,
     THINK_MODES,
     ReviewError,
-    is_qwen3_model,
     review_paths,
 )
 
@@ -45,15 +45,13 @@ def main() -> int:
         help="qwen3:14b 전용. 기본 FAST(/no_think).",
     )
     parser.add_argument("--deepseek", default="", help="비우면 교차 검증을 하지 않습니다.")
-    parser.add_argument("--llama", default=DEFAULT_MODEL)
+    parser.add_argument("--llama", default=DEFAULT_LLAMA, help="문장 정리 모델. 기본 llama3.1:8b")
     parser.add_argument("--ollama", default="http://127.0.0.1:11434")
     parser.add_argument("--note", default="이 소스의 메모리 버그와 초기화 버그를 찾아 주세요.")
     parser.add_argument("--num-predict", type=int, default=512, choices=PREDICT_CHOICES)
     args = parser.parse_args()
     profile = hardware_profile(args.vram, args.ram)
     ollama_opts = ollama_call_options(args.vram, args.ram, args.num_predict, args.model)
-    if is_qwen3_model(args.model):
-        ollama_opts["num_ctx"] = max(int(ollama_opts["num_ctx"]), 16384)
     print(
         f"모델 {args.model} / Ollama {args.ollama} / num_ctx {ollama_opts['num_ctx']} / {profile['note']}"
     )

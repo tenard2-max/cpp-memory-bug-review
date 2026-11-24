@@ -28,7 +28,13 @@ from whitelist import format_whitelist, load_whitelist
 DEFAULT_MODEL = "qwen2.5-coder:7b"
 QWEN3_MODEL = "qwen3:14b"
 DEFAULT_DEEPSEEK = "qwen2.5-coder:7b"
-DEFAULT_LLAMA = "qwen2.5-coder:7b"
+DEFAULT_LLAMA = "llama3.1:8b"
+POLISH_MODELS = (
+    "llama3.1:8b",
+    "llama3.2:3b",
+    "llama3.2:1b",
+    "qwen2.5-coder:7b",
+)
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 OLLAMA_OPTIONS = {"temperature": 0.0, "num_ctx": 4096, "num_thread": 8, "num_predict": 512}
 PREDICT_CHOICES = [512, 1024, 2048, 4096, 5120, 6144, 7168, 8190]
@@ -60,20 +66,18 @@ def normalize_think_mode(mode: str | None) -> str:
 
 
 def qwen3_call_preset(stage: str) -> dict:
-    """FAST=/no_think, DEEP=Thinking 프리셋. 모델명은 항상 qwen3:14b 하나다."""
+    """FAST=/no_think, DEEP=Thinking 프리셋. num_ctx는 하드웨어 프로필 값을 쓴다."""
     if stage == "DEEP":
         return {
             "think": True,
             "temperature": 0.6,
             "top_p": 0.95,
-            "num_ctx": 16384,
             "stage": "DEEP_TRACE",
         }
     return {
         "think": False,
         "temperature": 0.1,
         "top_p": 0.8,
-        "num_ctx": 16384,
         "stage": "FAST_SCAN",
     }
 
@@ -443,16 +447,27 @@ def review_paths(
             + ("think=false 고정(FAST)" if mode == "FAST" else "AUTO=의심 시 Thinking" if mode == "AUTO" else "Thinking 강제(DEEP)")
         )
     total = len(chunks)
-    last_pulse = {"percent": 0.0, "label": ""}
+    last_pulse = {"percent": 0.0, "label": "", "wait_ticks": 0}
 
     def emit(percent: float, label: str) -> None:
         last_pulse["percent"] = percent
         last_pulse["label"] = label
+        last_pulse["wait_ticks"] = 0
         _emit(on_progress, percent, label)
 
     def on_wait() -> None:
-        if last_pulse["label"]:
-            _emit(on_progress, last_pulse["percent"], last_pulse["label"])
+        if not last_pulse["label"]:
+            return
+        last_pulse["wait_ticks"] = int(last_pulse["wait_ticks"]) + 1
+        ticks = int(last_pulse["wait_ticks"])
+        # 첫 응답 전에는 스트림이 없어 0~1%에 멈춘 것처럼 보인다. 대기 초를 표시한다.
+        waiting = min(0.35, 0.04 + ticks * 0.01)
+        base = float(last_pulse["percent"])
+        _emit(
+            on_progress,
+            min(99.0, base + waiting),
+            f"{last_pulse['label']} · 모델 적재/프롬프트 대기 {ticks}초",
+        )
 
     if not chunks:
         result["analysis_complete"] = False
@@ -715,10 +730,22 @@ def _ollama_chat(
         options["num_batch"] = int(num_batch)
     if num_gpu is not None:
         options["num_gpu"] = int(num_gpu)
-    # Qwen3 FAST는 think=false 로 혼잣말을 끄고 즉답한다. DEEP만 Thinking을 연다.
+    # 11GB급에서 qwen3:14b ctx가 커지면 VRAM이 꽉 차 공유 메모리·CPU로 새어 초당 ~2토큰이 된다.
+    lowered = (model or "").strip().lower()
+    if lowered.startswith("qwen3:14b") or lowered.startswith("qwen3-14b"):
+        options["num_ctx"] = min(int(options.get("num_ctx") or 2048), 2048)
+        options["num_gpu"] = int(options.get("num_gpu") or 99)
+        options["num_batch"] = min(int(options.get("num_batch") or 256), 256)
+    # Qwen3 FAST/AUTO 1차는 think=false + /no_think. DEEP만 Thinking.
     prompt_user = user
-    if think is False and "/no_think" not in user:
-        prompt_user = user.rstrip() + "\n\n/no_think"
+    if think is False:
+        if "/no_think" not in user:
+            prompt_user = user.rstrip() + "\n\n/no_think"
+        body_think = False
+    elif think is True:
+        body_think = True
+    else:
+        body_think = None
     body = {
         "model": model,
         "stream": True,
@@ -729,8 +756,8 @@ def _ollama_chat(
         ],
         "options": options,
     }
-    if think is not None:
-        body["think"] = bool(think)
+    if body_think is not None:
+        body["think"] = body_think
     request = urllib.request.Request(
         base + "/api/chat",
         data=json.dumps(body).encode("utf-8"),
@@ -935,7 +962,6 @@ def review_chunks(
         call_think = bool(preset["think"])
         call_temperature = float(preset["temperature"])
         call_top_p = float(preset["top_p"])
-        call_ctx = int(preset["num_ctx"])
         stage_name = str(preset["stage"])
     return _ollama_chat(
         model,

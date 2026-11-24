@@ -33,6 +33,20 @@ def sample_host(extra_warnings: Sequence[str] | None = None) -> HostSnapshot:
         warnings.append("GPU_ENUM: 표시할 그래픽 장치를 찾지 못했습니다.")
     if memory.percent >= 90:
         warnings.append(f"RAM_PRESSURE: 시스템 메모리 {memory.percent:.0f}%")
+    for gpu in gpus:
+        used = gpu.memory_used_mb
+        total = gpu.memory_total_mb
+        if used is not None and total and total > 0 and (used / total) >= 0.92:
+            warnings.append(
+                f"VRAM_PRESSURE: {gpu.name} 전용 {used:.0f}/{total:.0f}MB. "
+                "공유 메모리로 넘어가면 LLM이 급격히 느려집니다."
+            )
+        shared_used = gpu.shared_used_mb
+        if shared_used is not None and shared_used >= 400:
+            warnings.append(
+                f"VRAM_SHARED: 공유 GPU 메모리 {shared_used:.0f}MB 사용 중. "
+                "num_ctx를 낮추거나 7B 모델로 바꾸세요."
+            )
     return HostSnapshot(
         system_cpu=system_cpu,
         ollama_cpu=ollama_cpu,
@@ -134,14 +148,15 @@ def _gpu_body(gpu: GpuSnapshot, *, vram_label: str, shared_memory: bool, host: H
         mem_ratio = None
         mem_text = f"profile {vram_label}"
 
-    if gpu.fan_rpm is not None:
-        third_ratio = min(gpu.fan_rpm / 5000.0, 1.0)
-        third_text = f"{gpu.fan_rpm:.0f} RPM"
-        third_label = "팬"
-    elif gpu.utilization_pct is not None:
+    # 연산 중인지가 더 중요해서 사용률을 우선한다. nvidia-smi 팬은 %이지 RPM이 아니다.
+    if gpu.utilization_pct is not None:
         third_ratio = gpu.utilization_pct / 100.0
         third_text = f"{gpu.utilization_pct:.0f}%"
         third_label = "사용률"
+    elif gpu.fan_percent is not None:
+        third_ratio = gpu.fan_percent / 100.0
+        third_text = f"{gpu.fan_percent:.0f}%"
+        third_label = "팬"
     else:
         third_ratio = None
         third_text = "N/A"
